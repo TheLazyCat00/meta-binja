@@ -1,0 +1,2 @@
+# No third-party Python packages are required by Meta Binja itself.
+# PySide6 and binaryninjaui are provided by Binary Ninja's UI environment.
