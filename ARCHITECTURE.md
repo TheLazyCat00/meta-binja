@@ -8,7 +8,16 @@ Meta Binja presents a single plugin-management UI while keeping lifecycle behavi
 
 ## Arbitrary Git repositories
 
-`GitProvider` manages repositories that are not represented by native extensions. Repositories are cloned into `meta-binja/repos` beneath Binary Ninja's user directory and activated from the normal user plugin directory. Directory symlinks are preferred; the MVP falls back to copying when symlink creation is unavailable.
+`GitProvider` manages repositories that are not represented by native extensions. Repository storage and plugin activation intentionally use different identities:
+
+- Checkouts live under `meta-binja/repos` beneath Binary Ninja's user directory with a collision-safe `<canonical-repo>-<hash>` name.
+- Enabled plugins are exposed from the normal user `plugins` directory with the repository's case-preserving basename, for example `plugins/RouteNinja`. This matters because the directory is also a Python package name and plugins may use absolute self-imports.
+- `managed.json` records both the source URL and the public activation name. Legacy hash-suffixed activations are migrated automatically when they can be moved safely.
+- If the desired public plugin name already belongs to something Meta Binja does not manage, enable/install fails rather than changing the package name or overwriting the existing plugin.
+
+Directory symlinks are preferred. If symlink creation is unavailable, Meta Binja copies the checkout and writes a private ownership marker into the copy so later disable/update/uninstall operations only mutate paths it can prove it owns.
+
+Git plugins with a `requirements.txt` are installed through Binary Ninja's own Python dependency installer before activation and again after updates. This keeps interpreter, virtual-environment, proxy, and per-version site-package behavior aligned with Binary Ninja. If dependency installation fails, the checkout is kept for diagnosis/retry but is not left enabled.
 
 Meta Binja deliberately does not execute arbitrary setup scripts or post-install hooks. Installing a Binary Ninja plugin still means trusting code that Binary Ninja may import and execute.
 
@@ -46,6 +55,6 @@ The main search field supports normal token search and direct repository URLs. A
 ## Next steps
 
 - Windows junction activation rather than copy fallback.
-- Dependency preview/install flow for Git plugins.
+- Dependency preview/confirmation UI for Git plugins.
 - First-class signed catalog schema.
 - README retrieval through each host's own API rather than conventional paths.
