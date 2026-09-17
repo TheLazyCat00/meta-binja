@@ -50,7 +50,7 @@ class PluginEntry:
         ).lower()
 
 
-_GIT_URL_RE = re.compile(r"^(?:(?:https?|ssh)://|git@)[^\s]+(?:\.git)?/?$", re.IGNORECASE)
+_GIT_URL_RE = re.compile(r"^(?:(?:https|ssh)://|git@)[^\s]+(?:\.git)?/?$", re.IGNORECASE)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 
 
@@ -79,7 +79,7 @@ def catalog_sources() -> List[str]:
 
 
 def is_repo_url(value: str) -> bool:
-    """Return whether *value* resembles a cloneable repository URL."""
+    """Return whether *value* is a credential-safe HTTPS or SSH repository URL."""
     if not isinstance(value, str):
         return False
     value = value.strip()
@@ -88,26 +88,41 @@ def is_repo_url(value: str) -> bool:
     if value.startswith("git@"):
         return ":" in value
     parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"https", "ssh"} or not parsed.hostname:
+        return False
+    if parsed.password is not None or (parsed.scheme.lower() == "https" and parsed.username is not None):
+        return False
+    try:
+        parsed.port
+    except ValueError:
+        return False
     return len([p for p in parsed.path.strip("/").split("/") if p]) >= 2
 
 
 def canonical_repo_url(value: str) -> str:
     """Normalize repository URLs without collapsing case-sensitive repository paths.
 
-    Hosts are case-insensitive. Repository paths are preserved unless the host is
-    explicitly known to use case-insensitive owner/repository identifiers.
+    Hosts are case-insensitive. SSH usernames and default transport ports are not
+    part of repository identity. Repository paths are preserved unless the host
+    is explicitly known to use case-insensitive owner/repository identifiers.
     """
     value = value.strip()
     if value.startswith("git@"):
         host_path = value.split("@", 1)[1]
         host, path = host_path.split(":", 1)
-        value = f"https://{host}/{path}"
+        value = f"ssh://git@{host}/{path}"
     parsed = urlparse(value)
-    host = parsed.netloc.lower()
+    hostname = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    default_port = {"https": 443, "ssh": 22}.get(parsed.scheme.lower())
+    host = hostname if port is None or port == default_port else f"{hostname}:{port}"
     path = parsed.path.rstrip("/")
     if path.endswith(".git"):
         path = path[:-4]
-    if host in _CASE_INSENSITIVE_REPO_PATH_HOSTS:
+    if hostname in _CASE_INSENSITIVE_REPO_PATH_HOSTS:
         path = path.lower()
     return f"https://{host}{path}"
 
@@ -388,7 +403,8 @@ class GitProvider:
 
     def install(self, entry) -> bool:
         """Clone and activate an arbitrary Git plugin."""
-        assert entry.repo_url
+        if not entry.repo_url or not is_repo_url(entry.repo_url):
+            return False
         repo = self.repo_path(entry.repo_url)
         if not repo.exists():
             result = subprocess.run(
