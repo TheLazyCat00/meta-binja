@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Dict, Optional
 from urllib.parse import urlparse
@@ -59,6 +60,7 @@ class GitProvider:
     """
 
     def __init__(self) -> None:
+        """Initialize the private checkout store and public activation directory."""
         self.root = Path(user_directory()) / "meta-binja" / "repos"
         self.root.mkdir(parents=True, exist_ok=True)
         self.active_dir = Path(user_directory()) / "plugins"
@@ -77,6 +79,7 @@ class GitProvider:
         return self.root / self._key(url)
 
     def _metadata_record(self, repo: Path) -> Dict[str, str]:
+        """Return persisted lifecycle metadata for one private checkout."""
         return self._read_metadata().get(repo.name, {})
 
     def activation_name(self, url: str, repo: Optional[Path] = None) -> str:
@@ -96,7 +99,13 @@ class GitProvider:
         return self.active_dir / repo.name
 
     def _read_metadata(self) -> Dict[str, Dict[str, str]]:
-        """Read the registry and normalize the legacy ``key -> URL`` shape."""
+        """Read the registry and normalize the legacy ``key -> URL`` shape.
+
+        A legacy string record is also explicit evidence that older Meta Binja
+        owned an activation named after that checkout key. This lets migration
+        remain automatic without treating a deterministic path name alone as
+        ownership proof.
+        """
         try:
             payload = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -108,14 +117,15 @@ class GitProvider:
         for key, value in payload.items():
             key = str(key)
             if isinstance(value, str):
-                out[key] = {"url": value}
+                out[key] = {"url": value, "legacy_activation_name": key}
                 continue
             if not isinstance(value, dict) or not isinstance(value.get("url"), str):
                 continue
             record = {"url": value["url"]}
-            activation_name = value.get("activation_name")
-            if isinstance(activation_name, str) and activation_name:
-                record["activation_name"] = activation_name
+            for field in ("activation_name", "legacy_activation_name"):
+                candidate = value.get(field)
+                if isinstance(candidate, str) and candidate:
+                    record[field] = candidate
             out[key] = record
         return out
 
@@ -123,13 +133,21 @@ class GitProvider:
         """Persist the local checkout registry."""
         self.metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
-    def _remember(self, url: str, repo: Path, activation_name: Optional[str] = None) -> None:
-        """Persist source URL and, once known, the public activation name."""
+    def _remember(
+        self,
+        url: str,
+        repo: Path,
+        activation_name: Optional[str] = None,
+        legacy_activation_name: Optional[str] = None,
+    ) -> None:
+        """Persist source URL plus public or legacy activation ownership evidence."""
         metadata = self._read_metadata()
         record = dict(metadata.get(repo.name, {}))
         record["url"] = url
         if activation_name:
             record["activation_name"] = _validated_activation_name(activation_name)
+        if legacy_activation_name:
+            record["legacy_activation_name"] = _validated_activation_name(legacy_activation_name)
         metadata[repo.name] = record
         self._write_metadata(metadata)
 
@@ -142,9 +160,11 @@ class GitProvider:
 
     @staticmethod
     def _marker_path(active: Path) -> Path:
+        """Return the ownership-marker path inside a copied activation."""
         return active / _MANAGED_ACTIVATION_MARKER
 
     def _write_copy_marker(self, active: Path, repo: Path) -> None:
+        """Mark a copied activation as owned by the given private checkout."""
         self._marker_path(active).write_text(
             json.dumps({"checkout": str(repo.resolve())}, sort_keys=True),
             encoding="utf-8",
@@ -166,18 +186,39 @@ class GitProvider:
         except (OSError, ValueError, TypeError):
             return False
 
-    def _migrate_legacy_activation(self, url: str, repo: Path) -> Path:
-        """Rename the old hash-suffixed activation to its package name.
+    def _legacy_activation_owned_by(self, legacy: Path, repo: Path) -> bool:
+        """Return whether a legacy activation has independent ownership evidence."""
+        if self._activation_owned_by(legacy, repo):
+            return True
+        remembered = self._metadata_record(repo).get("legacy_activation_name")
+        return bool(remembered and _validated_activation_name(remembered) == legacy.name)
 
-        The old path is unambiguously Meta Binja-owned because it exactly
-        matches the private checkout key. If the desired path is occupied, no
-        destructive migration is attempted; enabling will report the conflict.
-        """
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        """Remove a file, symlink, or directory without following directory symlinks."""
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+    def _is_usable_worktree(self, repo: Path) -> bool:
+        """Return whether *repo* is a usable non-bare Git worktree."""
+        if not repo.is_dir():
+            return False
+        inside = self._git(repo, "rev-parse", "--is-inside-work-tree", check=False).strip().lower()
+        bare = self._git(repo, "rev-parse", "--is-bare-repository", check=False).strip().lower()
+        return inside == "true" and bare == "false"
+
+    def _migrate_legacy_activation(self, url: str, repo: Path) -> Path:
+        """Move an owned old hash-suffixed activation to its package name."""
         desired = self.active_path(url, repo)
         legacy = self._legacy_active_path(repo)
         if desired == legacy or desired.exists() or desired.is_symlink():
             return desired
         if not (legacy.exists() or legacy.is_symlink()):
+            return desired
+        if not self._legacy_activation_owned_by(legacy, repo):
+            log_warn(f"Meta Binja: preserving unmanaged legacy activation {legacy}")
             return desired
         try:
             legacy.rename(desired)
@@ -189,19 +230,51 @@ class GitProvider:
         return desired
 
     def _remove_managed_activation(self, active: Path, repo: Path, *, legacy: bool = False) -> None:
-        """Remove *active* only when Meta Binja can establish ownership."""
+        """Remove an activation only when Meta Binja can establish ownership."""
         if not (active.exists() or active.is_symlink()):
             return
-        if not legacy and not self._activation_owned_by(active, repo):
+        owned = self._legacy_activation_owned_by(active, repo) if legacy else self._activation_owned_by(active, repo)
+        if not owned:
             return
-        if active.is_symlink() or active.is_file():
-            active.unlink()
-        else:
-            shutil.rmtree(active)
+        self._remove_path(active)
+
+    def _copy_activation_transactionally(self, repo: Path, active: Path) -> None:
+        """Build a marked copy off-path, then swap it into the stable activation path.
+
+        Rebuilding an existing copied activation uses a sibling backup because
+        replacing a non-empty directory is not portable. If the final rename
+        fails, the previous activation is restored before the exception escapes.
+        """
+        token = uuid.uuid4().hex
+        staged = active.parent / f".{active.name}.meta-binja-stage-{token}"
+        backup = active.parent / f".{active.name}.meta-binja-backup-{token}"
+        try:
+            shutil.copytree(repo, staged, ignore=shutil.ignore_patterns(".git"))
+            self._write_copy_marker(staged, repo)
+            if active.exists() or active.is_symlink():
+                if not self._activation_owned_by(active, repo):
+                    raise RuntimeError(f"Refusing to replace unmanaged activation: {active}")
+                active.rename(backup)
+                try:
+                    staged.rename(active)
+                except Exception:
+                    backup.rename(active)
+                    raise
+                self._remove_path(backup)
+            else:
+                staged.rename(active)
+        finally:
+            if staged.exists() or staged.is_symlink():
+                self._remove_path(staged)
+            if backup.exists() or backup.is_symlink():
+                if not (active.exists() or active.is_symlink()):
+                    backup.rename(active)
+                else:
+                    self._remove_path(backup)
 
     def _entry_from_checkout(self, url: str, repo: Path, check_updates: bool = True) -> PluginEntry:
         """Build a Git entry for a known local checkout."""
-        installed = (repo / ".git").exists()
+        installed = self._is_usable_worktree(repo)
         active = self._migrate_legacy_activation(url, repo) if installed else self.active_path(url, repo)
         version = self._git(repo, "rev-parse", "--short", "HEAD", check=False).strip() if installed else None
         return PluginEntry(
@@ -228,11 +301,11 @@ class GitProvider:
         out = []
         seen = set()
         for repo in sorted(self.root.iterdir()):
-            if not repo.is_dir() or not (repo / ".git").exists():
+            if not repo.is_dir():
                 continue
             record = metadata.get(repo.name, {})
             url = record.get("url", "")
-            if not url:
+            if not url and self._is_usable_worktree(repo):
                 url = self._git(repo, "remote", "get-url", "origin", check=False).strip()
             if not is_repo_url(url):
                 continue
@@ -240,7 +313,12 @@ class GitProvider:
             if canonical in seen:
                 continue
             seen.add(canonical)
-            self._remember(url, repo, record.get("activation_name"))
+            self._remember(
+                url,
+                repo,
+                record.get("activation_name"),
+                record.get("legacy_activation_name"),
+            )
             out.append(self._entry_from_checkout(url, repo, check_updates))
         return out
 
@@ -267,19 +345,29 @@ class GitProvider:
             )
         return True
 
+    def _clone(self, url: str, repo: Path) -> bool:
+        """Clone *url* recursively into *repo* and verify the resulting worktree."""
+        result = subprocess.run(
+            ["git", "clone", "--recursive", url, str(repo)],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and self._is_usable_worktree(repo)
+
     def install(self, entry) -> bool:
-        """Clone and activate an arbitrary Git plugin."""
+        """Ensure a valid checkout exists, then activate an arbitrary Git plugin."""
         if not entry.repo_url or not is_repo_url(entry.repo_url):
             return False
         repo = self.repo_path(entry.repo_url)
-        if not repo.exists():
-            result = subprocess.run(
-                ["git", "clone", "--recursive", entry.repo_url, str(repo)],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                return False
+        if repo.exists() or repo.is_symlink():
+            if not self._is_usable_worktree(repo):
+                self._remove_path(repo)
+                if not self._clone(entry.repo_url, repo):
+                    self._remove_path(repo)
+                    return False
+        elif not self._clone(entry.repo_url, repo):
+            self._remove_path(repo)
+            return False
         self._remember(entry.repo_url, repo)
         return self.set_enabled(entry, True)
 
@@ -288,8 +376,7 @@ class GitProvider:
         assert entry.repo_url
         self.set_enabled(entry, False)
         repo = self.repo_path(entry.repo_url)
-        if repo.exists():
-            shutil.rmtree(repo)
+        self._remove_path(repo)
         self._forget(repo)
         return True
 
@@ -300,26 +387,27 @@ class GitProvider:
         active = self._migrate_legacy_activation(entry.repo_url, repo)
         legacy = self._legacy_active_path(repo)
         if enabled:
-            if not repo.exists():
-                return False
+            if not self._is_usable_worktree(repo):
+                raise RuntimeError(f"Cannot enable {repo_name_from_url(entry.repo_url)}: checkout is not a usable Git worktree")
             if active.exists() or active.is_symlink():
                 if not self._activation_owned_by(active, repo):
                     raise RuntimeError(
                         f"Cannot enable {repo_name_from_url(entry.repo_url)}: {active} already exists "
                         "and is not managed by Meta Binja"
                     )
-                self._install_requirements(repo)
+                try:
+                    self._install_requirements(repo)
+                except Exception:
+                    self._remove_managed_activation(active, repo)
+                    raise
                 self._remember(entry.repo_url, repo, active.name)
                 return True
 
-            # Install dependencies before exposing the checkout. This also makes
-            # an explicit re-enable a safe retry after a previous pip failure.
             self._install_requirements(repo)
             try:
                 os.symlink(repo, active, target_is_directory=True)
             except (OSError, NotImplementedError):
-                shutil.copytree(repo, active, ignore=shutil.ignore_patterns(".git"))
-                self._write_copy_marker(active, repo)
+                self._copy_activation_transactionally(repo, active)
             self._remember(entry.repo_url, repo, active.name)
             return True
 
@@ -331,6 +419,8 @@ class GitProvider:
         """Fast-forward a plugin, reinstall requirements, and refresh copied activations."""
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
+        if not self._is_usable_worktree(repo):
+            raise RuntimeError(f"Cannot update {repo_name_from_url(entry.repo_url)}: checkout is not a usable Git worktree")
         result = subprocess.run(
             ["git", "-C", str(repo), "pull", "--ff-only", "--recurse-submodules"],
             capture_output=True,
@@ -338,18 +428,14 @@ class GitProvider:
         )
         if result.returncode != 0:
             return False
+        active = self._migrate_legacy_activation(entry.repo_url, repo)
         try:
             self._install_requirements(repo)
         except Exception:
-            # A checkout with unsatisfied dependencies must not remain exposed
-            # for the next Binary Ninja restart.
-            self.set_enabled(entry, False)
+            self._remove_managed_activation(active, repo)
             raise
-        active = self._migrate_legacy_activation(entry.repo_url, repo)
         if active.exists() and not active.is_symlink() and self._activation_owned_by(active, repo):
-            shutil.rmtree(active)
-            shutil.copytree(repo, active, ignore=shutil.ignore_patterns(".git"))
-            self._write_copy_marker(active, repo)
+            self._copy_activation_transactionally(repo, active)
         return True
 
     @staticmethod
