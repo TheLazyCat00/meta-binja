@@ -6,6 +6,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 if "binaryninja" not in sys.modules:
@@ -63,11 +64,31 @@ class UrlTests(unittest.TestCase):
         )
 
     def test_ssh_repo(self):
-        """Normalize SCP-style GitHub SSH clone URLs."""
+        """Normalize SCP-style and ssh:// GitHub clone URLs to one identity."""
         self.assertTrue(is_repo_url("git@github.com:owner/repo.git"))
+        self.assertTrue(is_repo_url("ssh://git@github.com/owner/repo.git"))
         self.assertEqual(
             canonical_repo_url("git@github.com:owner/repo.git"),
             "https://github.com/owner/repo",
+        )
+        self.assertEqual(
+            canonical_repo_url("ssh://git@github.com/owner/repo.git"),
+            canonical_repo_url("https://github.com/owner/repo"),
+        )
+
+    def test_default_ports_are_normalized_and_custom_ports_preserved(self):
+        """Ignore default transport ports while retaining custom SSH endpoints."""
+        self.assertEqual(
+            canonical_repo_url("ssh://git@github.com:22/owner/repo.git"),
+            "https://github.com/owner/repo",
+        )
+        self.assertEqual(
+            canonical_repo_url("https://github.com:443/owner/repo.git"),
+            "https://github.com/owner/repo",
+        )
+        self.assertEqual(
+            canonical_repo_url("ssh://git@github.com:2222/owner/repo.git"),
+            "https://github.com:2222/owner/repo",
         )
 
     def test_preserves_path_case_for_arbitrary_hosts(self):
@@ -80,6 +101,13 @@ class UrlTests(unittest.TestCase):
             canonical_repo_url("https://git.example.test/Team/Plugin.git"),
             canonical_repo_url("https://git.example.test/team/plugin.git"),
         )
+
+    def test_rejects_cleartext_and_embedded_credentials(self):
+        """Reject HTTP and credential-bearing web URLs before Git sees them."""
+        self.assertFalse(is_repo_url("http://github.com/owner/repo"))
+        self.assertFalse(is_repo_url("https://user@github.com/owner/repo"))
+        self.assertFalse(is_repo_url("https://user:token@github.com/owner/repo"))
+        self.assertTrue(is_repo_url("ssh://git@github.com/owner/repo"))
 
     def test_rejects_plain_text_and_non_strings(self):
         """Reject search text, host-only URLs, and non-string values."""
@@ -159,6 +187,18 @@ class GitProviderTests(unittest.TestCase):
             self.assertEqual(entries[0].source, PluginSource.GIT)
             self.assertTrue(entries[0].installed)
             self.assertEqual(entries[0].repo_url, "https://github.com/example/sample")
+
+    def test_install_rejects_unsafe_urls_before_clone(self):
+        """Do not invoke Git for cleartext or credential-bearing repository URLs."""
+        provider = GitProvider.__new__(GitProvider)
+        for url in (
+            "http://github.com/example/plugin",
+            "https://user:token@github.com/example/plugin",
+        ):
+            with self.subTest(url=url), patch("meta_binja.core.subprocess.run") as run:
+                entry = types.SimpleNamespace(repo_url=url)
+                self.assertFalse(provider.install(entry))
+                run.assert_not_called()
 
 
 if __name__ == "__main__":
