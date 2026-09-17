@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed Binary Ninja settings registration so `metaBinja.catalogSources` uses the valid `metaBinja` group.
+- Fixed README rendering for angle-bracket placeholders such as `<preset>` without breaking supported HTML.
+- Suppressed duplicate Native rows for Git activations that Meta Binja can prove it owns.
+- Git subprocesses now use Windows' no-console creation flag, preventing command prompt windows from flashing during startup, refreshes, and plugin lifecycle actions.
 - Separated Git checkout identity from Binary Ninja plugin-package identity: private checkouts remain hash-suffixed, while enabled plugins use the repository's case-preserving basename (for example `RouteNinja`).
 - Added automatic migration from the legacy hash-suffixed activation layout and persisted activation names in `managed.json`.
 - Added ownership-aware activation handling and explicit name-collision failures so Meta Binja does not overwrite unrelated plugins or mutate their package names.
