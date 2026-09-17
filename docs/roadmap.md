@@ -1,11 +1,10 @@
 # Roadmap
 
-Near-term priorities after the MVP:
+Near-term priorities:
 
-1. Move Git/network operations off the UI thread.
-2. Add richer plugin metadata and README rendering.
-3. Improve Windows activation with directory junctions.
-4. Add an explicit dependency preview/install flow for Git-backed plugins.
-5. Add a full-width manager pane/window in addition to the sidebar.
-6. Define a richer, optionally signed catalog schema.
-7. Add integration tests against supported Binary Ninja builds.
+1. Improve Windows activation with directory junctions.
+2. Add an explicit dependency preview/install flow for Git-backed plugins.
+3. Define a richer, optionally signed catalog schema.
+4. Add integration tests against supported Binary Ninja builds.
+5. Support README retrieval for more Git hosts through their own APIs.
+6. Offer bulk actions, such as updating every outdated plugin at once.

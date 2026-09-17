@@ -22,15 +22,30 @@ Meta Binja deliberately does not execute arbitrary setup scripts or post-install
 
 Entries are normalized to the same `PluginEntry` model. Catalog results are deduplicated against native plugins by canonical repository URL, with the native extension taking precedence.
 
+## Repository metadata
+
+`metadata.py` holds the Qt-free fetching layer: README retrieval, Markdown link
+rewriting, GitHub repository facts, and the TTL cache shared by catalogs,
+READMEs, and facts. See [docs/metadata.md](docs/metadata.md).
+
+## Threading
+
+The UI owns a small thread pool. Refreshes, catalog downloads, README fetches,
+and every lifecycle action run there, and results return to the UI thread
+through signals; a stale result is discarded when the user has moved on. The
+panel keeps each task alive until it reports back, because a pool-owned
+runnable is destroyed with its signal sender. A refresh rebuilds the shared
+registry, so one is dropped while another refresh or a lifecycle action is in
+flight. Cache updates are a read-modify-write, so they are serialized per cache
+path and each write lands through its own temporary file.
+
 ## Search behavior
 
-The main search field supports normal token search and direct repository URLs. A URL first resolves against known native/catalog entries; otherwise it opens a Git-backed management page directly.
+The main search field supports normal token search and direct repository URLs. A URL first resolves against known native/catalog entries; otherwise it opens a Git-backed management page directly. Token search ranks exact and prefix name matches above description matches.
 
 ## Next steps
 
-- Move Git/network operations off the UI thread.
-- Rich README/release metadata.
 - Windows junction activation rather than copy fallback.
 - Dependency preview/install flow for Git plugins.
 - First-class signed catalog schema.
-- Dedicated full-width pane/window in addition to the sidebar.
+- README retrieval through each host's own API rather than conventional paths.

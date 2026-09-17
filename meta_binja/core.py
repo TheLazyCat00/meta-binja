@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import subprocess
-import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -15,6 +14,11 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from binaryninja import RepositoryManager, Settings, log_warn, user_directory
+
+from .metadata import (
+    CATALOG_TTL, DETAILS_TTL, README_TTL, JsonCache, default_cache_dir,
+    fetch_readme, fetch_repo_details, github_json, open_request
+)
 
 PREFIX = "metaBinja"
 CATALOG_SOURCES = f"{PREFIX}.catalogSources"
@@ -40,6 +44,7 @@ class PluginEntry:
     enabled: bool = False
     update_available: bool = False
     source_name: str = ""
+    local_path: Optional[str] = None
     backend: Any = field(default=None, repr=False, compare=False)
 
     @property
@@ -48,6 +53,39 @@ class PluginEntry:
         return " ".join(
             filter(None, [self.name, self.description, self.repo_url or "", self.author or "", self.source_name])
         ).lower()
+
+    @property
+    def source_label(self) -> str:
+        """Return the display name of the provider that owns this entry."""
+        return {
+            PluginSource.NATIVE: "Native",
+            PluginSource.GIT: "Git",
+            PluginSource.CATALOG: "Catalog",
+        }[self.source]
+
+    @property
+    def status_kind(self) -> str:
+        """Return the lifecycle state, kept separate from the entry's source.
+
+        Source and status are independent facts: a native extension can be
+        enabled, and a catalog entry can be installed from Git. The UI colors
+        this value and shows the source in its own column.
+        """
+        if not self.installed:
+            return "available"
+        if self.update_available:
+            return "update"
+        return "enabled" if self.enabled else "disabled"
+
+    @property
+    def status_label(self) -> str:
+        """Return the human-readable form of :attr:`status_kind`."""
+        return {
+            "available": "Available",
+            "update": "Update",
+            "enabled": "Enabled",
+            "disabled": "Disabled",
+        }[self.status_kind]
 
 
 _GIT_URL_RE = re.compile(r"^(?:(?:https|ssh)://|git@)[^\s]+(?:\.git)?/?$", re.IGNORECASE)
@@ -208,24 +246,33 @@ class NativeProvider:
 class CatalogProvider:
     """Read-only discovery provider for repo URLs, Markdown lists, and JSON catalogs."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, cache: Optional[JsonCache] = None, force: bool = False) -> None:
         self.url = url.strip()
+        self.cache = cache
+        self.force = force
 
-    def _load(self):
-        """Fetch a configured catalog and return its decoded text and content type."""
+    def _fetch(self):
+        """Fetch a configured catalog from the network."""
         parts = github_repo_parts(self.url)
         if parts:
             owner, repo = parts
-            request = urllib.request.Request(
-                f"https://api.github.com/repos/{owner}/{repo}/readme",
-                headers={"Accept": "application/vnd.github+json", "User-Agent": "meta-binja"},
-            )
-            with urllib.request.urlopen(request, timeout=10) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            payload = github_json(f"/repos/{owner}/{repo}/readme")
             raw = base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
             return raw, "text/markdown"
-        with urllib.request.urlopen(self.url, timeout=10) as response:
+        with open_request(self.url) as response:
             return response.read().decode("utf-8", errors="replace"), response.headers.get("content-type", "")
+
+    def _load(self):
+        """Return the catalog's decoded text and content type, using the TTL cache."""
+        key = f"catalog:{self.url}"
+        if self.cache is not None and not self.force:
+            cached = self.cache.get(key)
+            if isinstance(cached, list) and len(cached) == 2 and isinstance(cached[0], str):
+                return cached[0], cached[1] or ""
+        raw, content_type = self._fetch()
+        if self.cache is not None:
+            self.cache.set(key, [raw, content_type])
+        return raw, content_type
 
     def entries(self) -> List[PluginEntry]:
         """Parse all discoverable plugin entries from this catalog."""
@@ -361,8 +408,12 @@ class GitProvider:
             metadata.pop(repo.name, None)
             self._write_metadata(metadata)
 
-    def _entry_from_checkout(self, url: str, repo: Path) -> PluginEntry:
-        """Build a Git entry for a known local checkout."""
+    def _entry_from_checkout(self, url: str, repo: Path, check_updates: bool = True) -> PluginEntry:
+        """Build a Git entry for a known local checkout.
+
+        ``check_updates`` is opt-in because it contacts the remote: routine
+        list rendering stays local, and only an explicit refresh fetches.
+        """
         active = self.active_dir / repo.name
         installed = (repo / ".git").exists()
         version = self._git(repo, "rev-parse", "--short", "HEAD", check=False).strip() if installed else None
@@ -374,16 +425,17 @@ class GitProvider:
             version=version or None,
             installed=installed,
             enabled=active.exists() or active.is_symlink(),
-            update_available=self._update_available(repo) if installed else False,
+            update_available=self._update_available(repo) if installed and check_updates else False,
             source_name="Git repository",
+            local_path=str(repo) if installed else None,
             backend=self,
         )
 
-    def entry_from_url(self, url: str) -> PluginEntry:
+    def entry_from_url(self, url: str, check_updates: bool = True) -> PluginEntry:
         """Build a Git entry for a URL, including its current local state."""
-        return self._entry_from_checkout(url, self.repo_path(url))
+        return self._entry_from_checkout(url, self.repo_path(url), check_updates)
 
-    def entries(self) -> List[PluginEntry]:
+    def entries(self, check_updates: bool = True) -> List[PluginEntry]:
         """Enumerate previously installed Git plugins after refresh or restart."""
         metadata = self._read_metadata()
         out = []
@@ -401,7 +453,7 @@ class GitProvider:
                 continue
             seen.add(canonical)
             self._remember(url, repo)
-            out.append(self._entry_from_checkout(url, repo))
+            out.append(self._entry_from_checkout(url, repo, check_updates))
         return out
 
     def install(self, entry) -> bool:
@@ -486,12 +538,78 @@ class GitProvider:
             return False
 
 
+FILTER_ALL = "all"
+FILTER_INSTALLED = "installed"
+FILTER_UPDATES = "updates"
+FILTER_AVAILABLE = "available"
+
+FILTER_LABELS = (
+    (FILTER_ALL, "All plugins"),
+    (FILTER_INSTALLED, "Installed"),
+    (FILTER_UPDATES, "Updates available"),
+    (FILTER_AVAILABLE, "Not installed"),
+)
+
+
+def matches_filter(entry: PluginEntry, filter_mode: str) -> bool:
+    """Return whether *entry* belongs in the given list filter."""
+    if filter_mode == FILTER_INSTALLED:
+        return entry.installed
+    if filter_mode == FILTER_UPDATES:
+        return entry.installed and entry.update_available
+    if filter_mode == FILTER_AVAILABLE:
+        return not entry.installed
+    return True
+
+
+def relevance(entry: PluginEntry, tokens: List[str]) -> int:
+    """Rank how directly *entry* answers the searched tokens; lower is better."""
+    if not tokens:
+        return 0
+    name = entry.name.lower()
+    joined = " ".join(tokens)
+    if name == joined:
+        return 0
+    if name.startswith(joined):
+        return 1
+    if joined in name:
+        return 2
+    if all(token in name for token in tokens):
+        return 3
+    return 4
+
+
 class PluginRegistry:
     """Aggregate native, Git, and discovery-catalog providers into one model."""
 
-    def __init__(self) -> None:
+    def __init__(self, cache_dir: Optional[Path] = None) -> None:
         self.native, self.git = NativeProvider(), GitProvider()
         self._entries: Dict[str, PluginEntry] = {}
+        self.errors: List[str] = []
+        try:
+            root = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+        except Exception:  # pragma: no cover - Binary Ninja user directory unavailable
+            root = Path(".")
+        self.catalog_cache = JsonCache(root / "catalogs.json", CATALOG_TTL)
+        self.readme_cache = JsonCache(root / "readme.json", README_TTL)
+        self.details_cache = JsonCache(root / "details.json", DETAILS_TTL)
+
+    def readme(self, entry: PluginEntry, force: bool = False):
+        """Return the README document for *entry*, preferring its local checkout."""
+        local = Path(entry.local_path) if entry.local_path else None
+        if local is None and entry.repo_url:
+            candidate = self.git.repo_path(entry.repo_url)
+            local = candidate if (candidate / ".git").exists() else None
+        return fetch_readme(entry.repo_url, local, self.readme_cache, force)
+
+    def details(self, entry: PluginEntry, force: bool = False) -> Dict[str, Any]:
+        """Return host-provided repository facts for *entry*."""
+        return fetch_repo_details(entry.repo_url, self.details_cache, force)
+
+    def clear_caches(self) -> None:
+        """Drop cached catalogs, READMEs, and repository facts."""
+        for cache in (self.catalog_cache, self.readme_cache, self.details_cache):
+            cache.clear()
 
     @staticmethod
     def _copy_git_state(catalog: PluginEntry, git_entry: PluginEntry) -> PluginEntry:
@@ -503,16 +621,22 @@ class PluginRegistry:
         catalog.backend = git_entry.backend
         return catalog
 
-    def refresh(self, check_native_updates=False) -> List[PluginEntry]:
-        """Refresh and deduplicate entries from every configured provider."""
+    def refresh(self, check_native_updates=False, force=False) -> List[PluginEntry]:
+        """Refresh and deduplicate entries from every configured provider.
+
+        ``force`` bypasses the catalog TTL cache and checks Git remotes for
+        updates; without it a refresh stays local and instant.
+        """
+        self.errors = []
         if check_native_updates:
             try:
                 self.native.refresh()
             except Exception as exc:
                 log_warn(f"Meta Binja: native repository refresh failed: {exc}")
+                self.errors.append(f"Native refresh failed: {exc}")
 
         native_entries = self.native.entries()
-        git_entries = self.git.entries()
+        git_entries = self.git.entries(check_updates=check_native_updates or force)
         combined = list(native_entries)
         by_repo = {canonical_repo_url(e.repo_url): e for e in native_entries if e.repo_url}
 
@@ -528,9 +652,10 @@ class PluginRegistry:
 
         for source in catalog_sources():
             try:
-                entries = CatalogProvider(source).entries()
+                entries = CatalogProvider(source, self.catalog_cache, force).entries()
             except Exception as exc:
                 log_warn(f"Meta Binja: failed to load catalog {source}: {exc}")
+                self.errors.append(f"Catalog unavailable: {source} ({exc})")
                 continue
             for entry in entries:
                 canonical = canonical_repo_url(entry.repo_url) if entry.repo_url else None
@@ -551,20 +676,34 @@ class PluginRegistry:
         self._entries = {e.id: e for e in combined}
         return list(self._entries.values())
 
-    def search(self, query: str) -> List[PluginEntry]:
-        """Search unified entries, treating repository URLs as direct lookups."""
+    def search(self, query: str, filter_mode: str = FILTER_ALL) -> List[PluginEntry]:
+        """Search unified entries, treating repository URLs as direct lookups.
+
+        Results are ranked by how well the name matches before falling back to
+        installed-first alphabetical order, so typing a plugin's name puts it
+        at the top instead of burying it under description matches.
+        """
         query = query.strip()
         if is_repo_url(query):
             canonical = canonical_repo_url(query)
             for entry in self._entries.values():
                 if entry.repo_url and canonical_repo_url(entry.repo_url) == canonical:
                     return [entry]
-            return [self.git.entry_from_url(query)]
+            return [self.git.entry_from_url(query, check_updates=False)]
         tokens = query.lower().split()
-        entries = list(self._entries.values())
+        entries = [e for e in self._entries.values() if matches_filter(e, filter_mode)]
         if tokens:
             entries = [e for e in entries if all(t in e.searchable_text for t in tokens)]
-        return sorted(entries, key=lambda e: (not e.installed, e.name.lower()))
+        return sorted(entries, key=lambda e: (relevance(e, tokens), not e.installed, e.name.lower()))
+
+    def counts(self) -> Dict[str, int]:
+        """Return totals used by the UI's result summary line."""
+        entries = list(self._entries.values())
+        return {
+            "total": len(entries),
+            "installed": sum(1 for e in entries if e.installed),
+            "updates": sum(1 for e in entries if e.installed and e.update_available),
+        }
 
     def install(self, entry):
         """Install an entry through its native or Git lifecycle backend."""
