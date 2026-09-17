@@ -1,14 +1,11 @@
 """Regression tests for Git-backed plugin activation semantics."""
 
 import json
-import shutil
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-import binaryninja
 
 try:
     from tests.stubs import install_binaryninja
@@ -16,6 +13,8 @@ except ImportError:  # pragma: no cover - direct test invocation
     from stubs import install_binaryninja
 
 install_binaryninja()
+
+import binaryninja
 
 from meta_binja.core import GitProvider, repo_name_from_url
 
