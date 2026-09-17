@@ -15,10 +15,9 @@ _HTML_TAGS = {
     "dd", "del", "details", "div", "dl", "dt", "em", "h1", "h2", "h3", "h4",
     "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "ol", "p", "pre", "q",
     "s", "samp", "small", "span", "strong", "sub", "summary", "sup", "table",
-    "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "var",
+    "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul", "var",
 }
 _BARE_ANGLE_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9_-]*)(/?)>")
-_PLUGIN_KEY_RE = re.compile(r"[\s._-]+")
 _CREATE_NO_WINDOW = 0x08000000
 
 
@@ -35,6 +34,7 @@ class _HiddenConsoleSubprocess:
     _meta_binja_hidden_console = True
 
     def __init__(self, module: object) -> None:
+        """Wrap one module-like subprocess implementation."""
         self._module = module
 
     def run(self, *args, **kwargs):
@@ -97,6 +97,7 @@ def prepare_markdown(text: str) -> str:
     """
 
     def replace(match: re.Match[str]) -> str:
+        """Preserve supported Qt HTML tags and escape unknown bare tags."""
         if match.group(2).lower() in _HTML_TAGS:
             return match.group(0)
         body = f"{match.group(1)}{match.group(2)}{match.group(3)}"
@@ -105,15 +106,14 @@ def prepare_markdown(text: str) -> str:
     return _BARE_ANGLE_TAG_RE.sub(replace, text)
 
 
-def _plugin_key(value: object) -> str:
-    """Normalize a plugin display/path name for activation deduplication."""
+def _activation_key(value: object) -> str:
+    """Return a case-folded activation basename without lossy normalization."""
     if value is None:
         return ""
     try:
-        name = Path(str(value)).name
+        return Path(str(value)).name.casefold()
     except (TypeError, ValueError):
-        name = str(value)
-    return _PLUGIN_KEY_RE.sub("", name.casefold())
+        return str(value).casefold()
 
 
 def filter_managed_native_duplicates(entries: Iterable[object], managed_names: Iterable[str]) -> List[object]:
@@ -121,10 +121,12 @@ def filter_managed_native_duplicates(entries: Iterable[object], managed_names: I
 
     Binary Ninja discovers plugin directories in the user plugin folder and can
     therefore surface a Git plugin activated by Meta Binja as a second native
-    extension. Only names backed by a Meta Binja-owned activation are eligible
-    for suppression; unrelated native extensions remain untouched.
+    extension. Suppression requires an exact, case-insensitive match between a
+    proven managed activation basename and the native backend path basename;
+    display names and punctuation-normalized approximations are not ownership
+    evidence.
     """
-    managed = {_plugin_key(name) for name in managed_names if name}
+    managed = {_activation_key(name) for name in managed_names if name}
     if not managed:
         return list(entries)
 
@@ -132,11 +134,8 @@ def filter_managed_native_duplicates(entries: Iterable[object], managed_names: I
     for entry in entries:
         if getattr(entry, "source", None) is _core.PluginSource.NATIVE:
             backend = getattr(entry, "backend", None)
-            candidates = {
-                _plugin_key(getattr(entry, "name", "")),
-                _plugin_key(getattr(backend, "path", "")),
-            }
-            if managed.intersection(candidates):
+            backend_key = _activation_key(getattr(backend, "path", ""))
+            if backend_key and backend_key in managed:
                 continue
         out.append(entry)
     return out
@@ -182,6 +181,7 @@ def install_core_fixes() -> None:
     original_refresh = registry_type.refresh
 
     def refresh(self, *args, **kwargs):
+        """Refresh the registry and remove only proven managed native duplicates."""
         entries = original_refresh(self, *args, **kwargs)
         filtered = filter_managed_native_duplicates(entries, _managed_activation_names(self))
         if len(filtered) != len(entries):
@@ -200,6 +200,7 @@ def install_ui_fixes(ui_module: object) -> None:
     original_render = browser_type.render_markdown
 
     def render_markdown(self, text: str) -> None:
+        """Render README Markdown after escaping unsupported bare angle tags."""
         original_render(self, prepare_markdown(text))
 
     browser_type.render_markdown = render_markdown
