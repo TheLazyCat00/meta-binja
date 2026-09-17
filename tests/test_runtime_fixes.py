@@ -27,13 +27,17 @@ class HiddenConsoleSubprocessTests(unittest.TestCase):
     """Validate that Meta Binja never flashes Git console windows on Windows."""
 
     class FakeSubprocess:
+        """Minimal subprocess-like object used to capture delegated calls."""
+
         CREATE_NO_WINDOW = 0x08000000
 
         def __init__(self):
+            """Initialize the captured call list and passthrough marker."""
             self.calls = []
             self.marker = object()
 
         def run(self, *args, **kwargs):
+            """Record one subprocess invocation and return a sentinel result."""
             self.calls.append((args, kwargs))
             return "result"
 
@@ -89,6 +93,13 @@ class MarkdownFixTests(unittest.TestCase):
         source = '<details><summary>More</summary><img src="shot.png"></details>'
         self.assertEqual(prepare_markdown(source), source)
 
+    def test_supported_underline_tags_are_preserved(self):
+        """Qt-supported underline tags must not be escaped as placeholders."""
+        source = "Use <u>underlining</u>, but keep <preset> visible."
+        rendered = prepare_markdown(source)
+        self.assertIn("<u>underlining</u>", rendered)
+        self.assertIn("&lt;preset&gt;", rendered)
+
 
 class DuplicateFilteringTests(unittest.TestCase):
     """Validate suppression of Binary Ninja's second view of managed Git plugins."""
@@ -135,6 +146,31 @@ class DuplicateFilteringTests(unittest.TestCase):
         )
         self.assertEqual(filter_managed_native_duplicates([native], []), [native])
 
+    def test_punctuation_collision_does_not_suppress_unrelated_native_plugin(self):
+        """Managed ``foo-bar`` must not hide a distinct native ``foo_bar`` path."""
+        native = PluginEntry(
+            id="native:community:foo_bar",
+            name="foo-bar",
+            source=PluginSource.NATIVE,
+            backend=types.SimpleNamespace(path="foo_bar"),
+        )
+
+        self.assertEqual(
+            filter_managed_native_duplicates([native], ["foo-bar"]),
+            [native],
+        )
+
+    def test_backend_path_match_is_case_insensitive(self):
+        """Activation identity remains case-insensitive without normalizing punctuation."""
+        native = PluginEntry(
+            id="native:user:RouteNinja",
+            name="Route Ninja",
+            source=PluginSource.NATIVE,
+            backend=types.SimpleNamespace(path="routeninja"),
+        )
+
+        self.assertEqual(filter_managed_native_duplicates([native], ["RouteNinja"]), [])
+
 
 class SettingsFixTests(unittest.TestCase):
     """Validate Binary Ninja setting group registration."""
@@ -144,11 +180,15 @@ class SettingsFixTests(unittest.TestCase):
         calls = []
 
         class Settings:
+            """Capture the setting registration calls made by the runtime fix."""
+
             def register_group(self, group, title):
+                """Record a setting-group registration."""
                 calls.append(("group", group, title))
                 return True
 
             def register_setting(self, key, payload):
+                """Record a concrete setting registration."""
                 calls.append(("setting", key, payload))
                 return True
 
