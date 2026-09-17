@@ -1,10 +1,16 @@
 {
   "pluginmetadataversion": 2,
   "name": "Meta Binja",
+  "author": "TheLazyCat00",
+  "version": "0.1.0",
+  "minimumbinaryninjaversion": 0,
   "type": ["ui"],
   "api": ["python3"],
-  "description": "Unified Binary Ninja plugin manager for official extensions, custom catalogs, and Git repositories.",
+  "description": "Unified plugin manager for Binary Ninja",
   "longdescription": "Meta Binja provides a replacement-style plugin manager with unified search, direct repository URL installs, extra plugin catalogs, and management controls.",
-  "license": {"name": "MIT"},
+  "license": {
+    "name": "MIT",
+    "text": "MIT License"
+  },
   "platforms": ["Darwin", "Linux", "Windows"]
 }
