@@ -66,6 +66,18 @@ class GitActivationTests(unittest.TestCase):
             self.assertEqual(metadata[repo.name]["url"], url)
             self.assertEqual(metadata[repo.name]["activation_name"], "RouteNinja")
 
+    def test_persisted_activation_name_cannot_escape_plugin_directory(self):
+        url = "https://github.com/example/Plugin"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = self._checkout(provider, url)
+            provider.metadata_path.write_text(
+                json.dumps({repo.name: {"url": url, "activation_name": "../escape"}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unsafe plugin activation name"):
+                provider.active_path(url, repo)
+
     def test_enable_refuses_to_overwrite_unmanaged_name_collision(self):
         url = "https://github.com/0Dr3f/RouteNinja"
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -117,18 +129,30 @@ class GitActivationTests(unittest.TestCase):
 
         self.assertEqual(calls, [(None, b"requests>=2\n")])
 
-    def test_dependency_failure_does_not_create_activation(self):
+    def test_dependency_failure_does_not_create_activation_and_enable_retries(self):
         url = "https://github.com/example/Plugin"
         with tempfile.TemporaryDirectory() as temp_dir:
             provider = self._provider(temp_dir)
             repo = self._checkout(provider, url)
             entry = types.SimpleNamespace(repo_url=url)
-            with patch.object(provider, "_install_requirements", side_effect=RuntimeError("pip failed")):
+
+            with patch.object(
+                provider,
+                "_install_requirements",
+                side_effect=[RuntimeError("pip failed"), True],
+            ) as install_requirements, patch(
+                "meta_binja.git_provider.os.symlink",
+                side_effect=OSError("unavailable"),
+            ):
                 with self.assertRaisesRegex(RuntimeError, "pip failed"):
                     provider.install(entry)
+                self.assertFalse((provider.active_dir / "Plugin").exists())
+
+                self.assertTrue(provider.set_enabled(entry, True))
+                self.assertTrue((provider.active_dir / "Plugin").exists())
+                self.assertEqual(install_requirements.call_count, 2)
 
             self.assertTrue(repo.exists())
-            self.assertFalse((provider.active_dir / "Plugin").exists())
 
 
 if __name__ == "__main__":
