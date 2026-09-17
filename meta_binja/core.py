@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -57,7 +58,7 @@ def register_settings() -> None:
         "type": "array",
         "elementType": "string",
         "default": [],
-        "description": "Raw Markdown awesome-lists or JSON plugin catalogs to include in search.",
+        "description": "GitHub repository URLs, raw Markdown awesome-lists, or JSON plugin catalogs to include in search.",
         "ignore": []
     }))
 
@@ -93,6 +94,14 @@ def repo_name_from_url(value: str) -> str:
     return canonical_repo_url(value).rstrip("/").rsplit("/", 1)[-1] or "plugin"
 
 
+def github_repo_parts(value: str):
+    parsed = urlparse(value)
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if parsed.netloc.lower() != "github.com" or len(parts) != 2:
+        return None
+    return parts[0], parts[1].removesuffix(".git")
+
+
 class NativeProvider:
     def __init__(self) -> None:
         self.manager = RepositoryManager()
@@ -101,7 +110,7 @@ class NativeProvider:
         self.manager.check_for_updates()
 
     def entries(self) -> List[PluginEntry]:
-        out: List[PluginEntry] = []
+        out = []
         for repo in self.manager.repositories:
             for ext in repo.plugins:
                 try:
@@ -109,49 +118,53 @@ class NativeProvider:
                 except Exception:
                     version = None
                 out.append(PluginEntry(
-                    id=f"native:{repo.path}:{ext.path}",
-                    name=ext.name,
-                    source=PluginSource.NATIVE,
-                    description=ext.long_description or "",
-                    repo_url=ext.project_url,
-                    author=ext.author,
-                    version=version,
-                    installed=ext.installed,
-                    enabled=ext.enabled,
-                    update_available=ext.update_available,
-                    source_name=repo.path,
-                    backend=ext,
+                    id=f"native:{repo.path}:{ext.path}", name=ext.name, source=PluginSource.NATIVE,
+                    description=ext.long_description or "", repo_url=ext.project_url, author=ext.author,
+                    version=version, installed=ext.installed, enabled=ext.enabled,
+                    update_available=ext.update_available, source_name=repo.path, backend=ext
                 ))
         return out
 
     @staticmethod
-    def install(entry: PluginEntry) -> bool:
-        return bool(entry.backend.install())
+    def install(entry): return bool(entry.backend.install())
 
     @staticmethod
-    def uninstall(entry: PluginEntry) -> bool:
-        return bool(entry.backend.uninstall())
+    def uninstall(entry): return bool(entry.backend.uninstall())
 
     @staticmethod
-    def set_enabled(entry: PluginEntry, enabled: bool) -> bool:
+    def set_enabled(entry, enabled):
         if enabled:
             return bool(entry.backend.enable())
         entry.backend.enabled = False
         return True
 
     @staticmethod
-    def update(entry: PluginEntry) -> bool:
-        return bool(entry.backend.install(entry.backend.latest_version_id))
+    def update(entry): return bool(entry.backend.install(entry.backend.latest_version_id))
 
 
 class CatalogProvider:
+    """Read-only discovery provider for repo URLs, Markdown lists, and JSON catalogs."""
+
     def __init__(self, url: str) -> None:
-        self.url = url
+        self.url = url.strip()
+
+    def _load(self):
+        parts = github_repo_parts(self.url)
+        if parts:
+            owner, repo = parts
+            request = urllib.request.Request(
+                f"https://api.github.com/repos/{owner}/{repo}/readme",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "meta-binja"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            raw = base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
+            return raw, "text/markdown"
+        with urllib.request.urlopen(self.url, timeout=10) as response:
+            return response.read().decode("utf-8", errors="replace"), response.headers.get("content-type", "")
 
     def entries(self) -> List[PluginEntry]:
-        with urllib.request.urlopen(self.url, timeout=10) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            content_type = response.headers.get("content-type", "")
+        raw, content_type = self._load()
         if "json" in content_type or self.url.lower().endswith(".json"):
             return self._json(raw)
         return self._markdown(raw)
@@ -160,6 +173,9 @@ class CatalogProvider:
         out, seen = [], set()
         for name, url in _MD_LINK_RE.findall(raw):
             if not is_repo_url(url):
+                continue
+            parsed = urlparse(canonical_repo_url(url))
+            if parsed.netloc.lower() not in {"github.com", "gitlab.com", "codeberg.org", "bitbucket.org"}:
                 continue
             canonical = canonical_repo_url(url)
             if canonical in seen:
@@ -206,11 +222,8 @@ class GitProvider:
         digest = hashlib.sha256(canonical_repo_url(url).encode()).hexdigest()[:10]
         return f"{repo_name_from_url(url)}-{digest}"
 
-    def repo_path(self, url: str) -> Path:
-        return self.root / self._key(url)
-
-    def active_path(self, url: str) -> Path:
-        return self.active_dir / self._key(url)
+    def repo_path(self, url): return self.root / self._key(url)
+    def active_path(self, url): return self.active_dir / self._key(url)
 
     def entry_from_url(self, url: str) -> PluginEntry:
         repo, active = self.repo_path(url), self.active_path(url)
@@ -224,7 +237,7 @@ class GitProvider:
             source_name="Git repository", backend=self
         )
 
-    def install(self, entry: PluginEntry) -> bool:
+    def install(self, entry) -> bool:
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
         if not repo.exists():
@@ -233,7 +246,7 @@ class GitProvider:
                 return False
         return self.set_enabled(entry, True)
 
-    def uninstall(self, entry: PluginEntry) -> bool:
+    def uninstall(self, entry) -> bool:
         assert entry.repo_url
         self.set_enabled(entry, False)
         repo = self.repo_path(entry.repo_url)
@@ -241,7 +254,7 @@ class GitProvider:
             shutil.rmtree(repo)
         return True
 
-    def set_enabled(self, entry: PluginEntry, enabled: bool) -> bool:
+    def set_enabled(self, entry, enabled: bool) -> bool:
         assert entry.repo_url
         repo, active = self.repo_path(entry.repo_url), self.active_path(entry.repo_url)
         if enabled:
@@ -260,7 +273,7 @@ class GitProvider:
             shutil.rmtree(active)
         return True
 
-    def update(self, entry: PluginEntry) -> bool:
+    def update(self, entry) -> bool:
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
         result = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only", "--recurse-submodules"], capture_output=True, text=True)
@@ -273,7 +286,7 @@ class GitProvider:
         return True
 
     @staticmethod
-    def _git(repo: Path, *args: str, check: bool = True) -> str:
+    def _git(repo: Path, *args: str, check=True) -> str:
         if not repo.exists():
             return ""
         result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
@@ -296,7 +309,7 @@ class PluginRegistry:
         self.native, self.git = NativeProvider(), GitProvider()
         self._entries: Dict[str, PluginEntry] = {}
 
-    def refresh(self, check_native_updates: bool = False) -> List[PluginEntry]:
+    def refresh(self, check_native_updates=False) -> List[PluginEntry]:
         if check_native_updates:
             try:
                 self.native.refresh()
@@ -335,18 +348,18 @@ class PluginRegistry:
             entries = [e for e in entries if all(t in e.searchable_text for t in tokens)]
         return sorted(entries, key=lambda e: (not e.installed, e.name.lower()))
 
-    def install(self, entry: PluginEntry) -> bool:
+    def install(self, entry):
         if entry.source is PluginSource.NATIVE:
             return self.native.install(entry)
         if entry.source is PluginSource.CATALOG and entry.repo_url:
             entry = self.git.entry_from_url(entry.repo_url)
         return self.git.install(entry)
 
-    def uninstall(self, entry: PluginEntry) -> bool:
+    def uninstall(self, entry):
         return self.native.uninstall(entry) if entry.source is PluginSource.NATIVE else self.git.uninstall(entry)
 
-    def set_enabled(self, entry: PluginEntry, enabled: bool) -> bool:
+    def set_enabled(self, entry, enabled):
         return self.native.set_enabled(entry, enabled) if entry.source is PluginSource.NATIVE else self.git.set_enabled(entry, enabled)
 
-    def update(self, entry: PluginEntry) -> bool:
+    def update(self, entry):
         return self.native.update(entry) if entry.source is PluginSource.NATIVE else self.git.update(entry)
