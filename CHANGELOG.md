@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Separated Git checkout identity from Binary Ninja plugin-package identity: private checkouts remain hash-suffixed, while enabled plugins use the repository's case-preserving basename (for example `RouteNinja`).
+- Added automatic migration from the legacy hash-suffixed activation layout and persisted activation names in `managed.json`.
+- Added ownership-aware activation handling and explicit name-collision failures so Meta Binja does not overwrite unrelated plugins or mutate their package names.
+- Git plugins now install `requirements.txt` through Binary Ninja's configured Python dependency installer before activation and after updates; dependency failures leave the plugin disabled.
+
 ## 0.2.0
 
 - Plugin pages now lead with the repository's README, rendered from Markdown
