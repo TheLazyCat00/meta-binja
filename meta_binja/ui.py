@@ -18,6 +18,8 @@ from .core import PluginEntry, PluginRegistry, PluginSource, register_settings
 
 
 class ManagerWidget(SidebarWidget):
+    """Global sidebar implementing Meta Binja's search and management UI."""
+
     def __init__(self, name, frame, data):
         super().__init__(name)
         self.registry = PluginRegistry()
@@ -100,6 +102,7 @@ class ManagerWidget(SidebarWidget):
         self.refresh(False)
 
     def refresh(self, check_updates=False):
+        """Refresh providers and rerun the active search."""
         try:
             self.registry.refresh(check_updates)
         except Exception as exc:
@@ -108,6 +111,7 @@ class ManagerWidget(SidebarWidget):
         self._search(self.search.text())
 
     def _search(self, text):
+        """Render unified search results for *text*."""
         self.results = self.registry.search(text)
         self.list.clear()
         for entry in self.results:
@@ -120,15 +124,24 @@ class ManagerWidget(SidebarWidget):
         self.stack.setCurrentWidget(self.list_page)
 
     def _open_first(self):
+        """Open the first result when Enter is pressed in search."""
         if self.results:
             self._show_entry(self.results[0])
 
     def _open_item(self, item):
+        """Open the management page for an activated list item."""
         self._show_entry(item.data(Qt.UserRole))
 
     def _show_entry(self, entry):
+        """Render an entry while preserving discovery metadata and live Git state."""
         if entry.source is PluginSource.CATALOG and entry.repo_url:
-            entry = self.registry.git.entry_from_url(entry.repo_url)
+            git_state = self.registry.git.entry_from_url(entry.repo_url)
+            entry.installed = git_state.installed
+            entry.enabled = git_state.enabled
+            entry.update_available = git_state.update_available
+            entry.version = git_state.version or entry.version
+            entry.backend = git_state.backend
+
         self.current_entry = entry
         self.detail_name.setText(entry.name)
         status = "Update available" if entry.update_available else ("Installed" if entry.installed else "Not installed")
@@ -148,6 +161,7 @@ class ManagerWidget(SidebarWidget):
         self.stack.setCurrentWidget(self.detail_page)
 
     def _run_action(self, label, callback):
+        """Execute a lifecycle action and reload the current management page."""
         if not self.current_entry:
             return
         try:
@@ -160,13 +174,16 @@ class ManagerWidget(SidebarWidget):
         self._reload_current()
 
     def _reload_current(self):
+        """Refresh the current entry without losing its catalog presentation metadata."""
         if not self.current_entry:
             return
         old = self.current_entry
         self.refresh(False)
-        if old.repo_url and old.source is not PluginSource.NATIVE:
-            self._show_entry(self.registry.git.entry_from_url(old.repo_url))
-            return
+        if old.repo_url:
+            matches = self.registry.search(old.repo_url)
+            if matches:
+                self._show_entry(matches[0])
+                return
         for entry in self.registry.search(old.name):
             if entry.id == old.id:
                 self._show_entry(entry)
@@ -174,26 +191,37 @@ class ManagerWidget(SidebarWidget):
         self.stack.setCurrentWidget(self.list_page)
 
     def _install_or_uninstall(self):
+        """Install or uninstall the selected entry according to current state."""
         if not self.current_entry:
             return
-        self._run_action("Uninstall" if self.current_entry.installed else "Install",
-                         self.registry.uninstall if self.current_entry.installed else self.registry.install)
+        self._run_action(
+            "Uninstall" if self.current_entry.installed else "Install",
+            self.registry.uninstall if self.current_entry.installed else self.registry.install,
+        )
 
     def _toggle_enabled(self, checked):
-        self._run_action("Enable" if checked else "Disable",
-                         lambda entry: self.registry.set_enabled(entry, checked))
+        """Enable or disable the selected entry."""
+        self._run_action(
+            "Enable" if checked else "Disable",
+            lambda entry: self.registry.set_enabled(entry, checked),
+        )
 
     def _update(self):
+        """Update the selected entry."""
         self._run_action("Update", self.registry.update)
 
     def _settings_hint(self):
+        """Explain where additional discovery catalogs are configured."""
         QMessageBox.information(
-            self, "Meta Binja",
-            "Open Binary Ninja Settings and search for ‘Meta Binja’. Add raw Markdown or JSON catalog URLs under metaBinja.catalogSources."
+            self,
+            "Meta Binja",
+            "Open Binary Ninja Settings and search for ‘Meta Binja’. Add GitHub repository URLs, raw Markdown awesome-lists, or JSON catalog URLs under metaBinja.catalogSources.",
         )
 
 
 class MetaBinjaSidebarType(SidebarWidgetType):
+    """Sidebar type registered globally with Binary Ninja."""
+
     def __init__(self):
         icon = QImage(56, 56, QImage.Format_RGB32)
         icon.fill(0)
@@ -205,12 +233,15 @@ class MetaBinjaSidebarType(SidebarWidgetType):
         super().__init__(icon, "Meta Binja")
 
     def createWidget(self, frame, data):
+        """Create the global Meta Binja sidebar widget."""
         return ManagerWidget("Meta Binja", frame, data)
 
     def defaultLocation(self):
+        """Place Meta Binja in the right content sidebar by default."""
         return SidebarWidgetLocation.RightContent
 
     def contextSensitivity(self):
+        """Use one global sidebar context across Binary Ninja views."""
         return SidebarContextSensitivity.GlobalSidebarContext
 
 
@@ -218,9 +249,10 @@ _registered = False
 
 
 def register_ui():
+    """Register settings and the Meta Binja sidebar exactly once."""
     global _registered
     if _registered:
         return
-    _registered = True
     register_settings()
     Sidebar.addSidebarWidgetType(MetaBinjaSidebarType())
+    _registered = True
