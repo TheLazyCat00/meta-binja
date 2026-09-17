@@ -11,12 +11,67 @@ except ImportError:  # pragma: no cover - direct test invocation
 
 install_binaryninja()
 
+from meta_binja import core as meta_core
+from meta_binja import git_provider as meta_git_provider
 from meta_binja.core import PluginEntry, PluginSource
 from meta_binja.runtime_fixes import (
+    _HiddenConsoleSubprocess,
     filter_managed_native_duplicates,
+    install_subprocess_fixes,
     prepare_markdown,
     register_settings,
 )
+
+
+class HiddenConsoleSubprocessTests(unittest.TestCase):
+    """Validate that Meta Binja never flashes Git console windows on Windows."""
+
+    class FakeSubprocess:
+        CREATE_NO_WINDOW = 0x08000000
+
+        def __init__(self):
+            self.calls = []
+            self.marker = object()
+
+        def run(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return "result"
+
+    def test_windows_processes_include_create_no_window(self):
+        """Existing creation flags are preserved while the no-window flag is added."""
+        backend = self.FakeSubprocess()
+        wrapped = _HiddenConsoleSubprocess(backend)
+
+        with patch("meta_binja.runtime_fixes.os.name", "nt"):
+            result = wrapped.run(["git", "status"], creationflags=0x2, capture_output=True)
+
+        self.assertEqual(result, "result")
+        args, kwargs = backend.calls[0]
+        self.assertEqual(args[0], ["git", "status"])
+        self.assertEqual(kwargs["creationflags"], 0x2 | backend.CREATE_NO_WINDOW)
+        self.assertTrue(kwargs["capture_output"])
+
+    def test_non_windows_processes_are_unchanged(self):
+        """POSIX subprocess arguments are delegated without Windows-only flags."""
+        backend = self.FakeSubprocess()
+        wrapped = _HiddenConsoleSubprocess(backend)
+
+        with patch("meta_binja.runtime_fixes.os.name", "posix"):
+            wrapped.run(["git", "status"], capture_output=True)
+
+        self.assertNotIn("creationflags", backend.calls[0][1])
+
+    def test_proxy_preserves_other_subprocess_attributes(self):
+        """Code using subprocess constants/helpers still sees the wrapped module."""
+        backend = self.FakeSubprocess()
+        wrapped = _HiddenConsoleSubprocess(backend)
+        self.assertIs(wrapped.marker, backend.marker)
+
+    def test_install_routes_both_git_implementations_through_proxy(self):
+        """Both the active provider and legacy core provider use the hidden runner."""
+        install_subprocess_fixes()
+        self.assertTrue(getattr(meta_core.subprocess, "_meta_binja_hidden_console", False))
+        self.assertTrue(getattr(meta_git_provider.subprocess, "_meta_binja_hidden_console", False))
 
 
 class MarkdownFixTests(unittest.TestCase):
