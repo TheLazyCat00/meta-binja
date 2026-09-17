@@ -186,7 +186,7 @@ class ReadmeBrowser(QTextBrowser):
     @staticmethod
     def _download(url: str):
         """Fetch a README image, refusing oversized payloads."""
-        with open_request(url) as response:
+        with open_request(url, require_public=True) as response:
             data = response.read(MAX_README_IMAGE_BYTES + 1)
         if len(data) > MAX_README_IMAGE_BYTES:
             raise ValueError("README image too large")
@@ -376,15 +376,22 @@ class MetaBinjaPanel(QWidget):
     # ----------------------------------------------------------- list render
 
     def refresh(self, force: bool = False) -> None:
-        """Reload provider state, off the UI thread when it may hit the network."""
+        """Reload provider state, off the UI thread when it may hit the network.
+
+        Refreshes rebuild the shared registry, so a request that arrives while
+        one is already running — or during a lifecycle action — is dropped
+        rather than racing it to overwrite newer state.
+        """
+        if self._busy:
+            return
         self._set_busy(True, "Refreshing plugins…" if force else "Loading plugins…")
         self.tasks.run(
             lambda: self.registry.refresh(check_native_updates=force, force=force),
-            lambda _entries: self._refresh_done(),
+            lambda _entries: self._refresh_done(force),
             self._refresh_failed,
         )
 
-    def _refresh_done(self) -> None:
+    def _refresh_done(self, force: bool = False) -> None:
         """Re-render results once a refresh finishes."""
         self._set_busy(False, "")
         if self.registry.errors:
@@ -394,7 +401,7 @@ class MetaBinjaPanel(QWidget):
         self._pending_status = ""
         self._render_results()
         if self.current_entry is not None and self.stack.currentIndex() == 1:
-            self._reload_current()
+            self._reload_current(force)
 
     def _refresh_failed(self, message: str) -> None:
         """Report a refresh failure without blocking the UI."""
@@ -472,9 +479,13 @@ class MetaBinjaPanel(QWidget):
 
     # --------------------------------------------------------- detail render
 
-    def _show_entry(self, entry: PluginEntry) -> None:
-        """Render an entry while preserving discovery metadata and live Git state."""
-        if entry is self.current_entry and self.stack.currentIndex() == 1:
+    def _show_entry(self, entry: PluginEntry, force: bool = False) -> None:
+        """Render an entry while preserving discovery metadata and live Git state.
+
+        ``force`` comes from an explicit refresh and reaches the README and
+        repository facts, which are otherwise served from the TTL cache.
+        """
+        if entry is self.current_entry and self.stack.currentIndex() == 1 and not force:
             return
         if entry.source is PluginSource.CATALOG and entry.repo_url:
             git_state = self.registry.git.entry_from_url(entry.repo_url, check_updates=False)
@@ -510,7 +521,7 @@ class MetaBinjaPanel(QWidget):
         placeholder = entry.description.strip() or "No description available."
         self.readme.render_markdown(f"{placeholder}\n\n*Loading README…*")
         self.stack.setCurrentIndex(1)
-        self._load_detail_content(entry, token)
+        self._load_detail_content(entry, token, force)
 
     @staticmethod
     def _restyle_badge(label: QLabel, color: str) -> None:
@@ -520,10 +531,10 @@ class MetaBinjaPanel(QWidget):
             " padding: 1px 7px; font-size: 10px; font-weight: bold;"
         )
 
-    def _load_detail_content(self, entry: PluginEntry, token: int) -> None:
+    def _load_detail_content(self, entry: PluginEntry, token: int, force: bool = False) -> None:
         """Fetch README text and repository facts for *entry* in the background."""
         self.tasks.run(
-            lambda: (self.registry.readme(entry), self.registry.details(entry)),
+            lambda: (self.registry.readme(entry, force), self.registry.details(entry, force)),
             lambda payload: self._detail_ready(entry, token, payload),
             lambda message: self._detail_failed(entry, token, message),
         )
@@ -571,17 +582,34 @@ class MetaBinjaPanel(QWidget):
         self._set_busy(False, "")
         if not ok:
             self._set_error(f"{label} did not complete successfully.")
+            self._restore_controls()
         else:
             self._pending_status = f"{label} completed."
         self.refresh(force=False)
 
     def _action_failed(self, label: str, message: str) -> None:
-        """Report a lifecycle action that raised."""
+        """Report a lifecycle action that raised, restoring the controls."""
         self._set_busy(False, "")
         log_error(f"Meta Binja: {label} failed: {message}")
         self._set_error(f"{label} failed: {message}")
+        self._restore_controls()
 
-    def _reload_current(self) -> None:
+    def _restore_controls(self) -> None:
+        """Put the action controls back on the entry's actual state.
+
+        ``QCheckBox.clicked`` toggles before the action runs, so a failure would
+        otherwise leave the box showing a state that was never applied and the
+        next click would request the opposite action instead of a retry.
+        """
+        entry = self.current_entry
+        if entry is None:
+            return
+        self.enabled.blockSignals(True)
+        self.enabled.setChecked(entry.enabled)
+        self.enabled.blockSignals(False)
+        self.install_btn.setText("Uninstall" if entry.installed else "Install")
+
+    def _reload_current(self, force: bool = False) -> None:
         """Re-show the current entry using freshly refreshed provider state."""
         old = self.current_entry
         if old is None:
@@ -589,11 +617,11 @@ class MetaBinjaPanel(QWidget):
         if old.repo_url:
             matches = self.registry.search(old.repo_url)
             if matches:
-                self._show_entry(matches[0])
+                self._show_entry(matches[0], force)
                 return
         for entry in self.registry.search(old.name):
             if entry.id == old.id:
-                self._show_entry(entry)
+                self._show_entry(entry, force)
                 return
         self.show_list()
 

@@ -12,8 +12,8 @@ tests run anywhere.
 
 `tests/test_ui.py` builds the real Qt panel against those stubs using Qt's
 offscreen platform, covering table rendering, filtering, search ranking,
-navigation, sorting, and the install/uninstall flow. It skips when PySide6 is
-not installed.
+navigation, sorting, install, and both outcomes of the uninstall confirmation.
+It skips when PySide6 is not installed.
 
 For manual validation inside Binary Ninja:
 

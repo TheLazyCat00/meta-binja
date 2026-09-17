@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,8 +33,11 @@ DETAILS_TTL = 24 * 3600
 _README_NAMES = ("README.md", "README.markdown", "README.rst", "README.txt", "README")
 _MARKDOWN_SUFFIXES = (".md", ".markdown", "")
 _ABSOLUTE_TARGET_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//|#)", re.IGNORECASE)
-_MD_IMAGE_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)((?:\s+\"[^\"]*\")?\))")
-_MD_LINK_RE = re.compile(r"(?<!!)(\[[^\]]*\]\()([^)\s]+)((?:\s+\"[^\"]*\")?\))")
+# A target is either an angle-bracketed path, which may contain spaces, or a
+# bare path that may not.
+_MD_TARGET = r"(<[^<>]*>|[^)\s]+)"
+_MD_IMAGE_RE = re.compile(r"(!\[[^\]]*\]\()" + _MD_TARGET + r"((?:\s+\"[^\"]*\")?\))")
+_MD_LINK_RE = re.compile(r"(?<!!)(\[[^\]]*\]\()" + _MD_TARGET + r"((?:\s+\"[^\"]*\")?\))")
 _HTML_SRC_RE = re.compile(r"(<img\b[^>]*?\bsrc=[\"'])([^\"']+)([\"'])", re.IGNORECASE)
 
 
@@ -43,16 +50,31 @@ class ReadmeDocument:
     source_url: Optional[str] = None
 
 
+_CACHE_LOCKS: Dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(path: Path) -> threading.Lock:
+    """Return the lock shared by every cache instance using *path*."""
+    key = str(Path(path).absolute())
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(key, threading.Lock())
+
+
 class JsonCache:
     """Small TTL cache persisted as a single JSON file.
 
     Every operation is best effort: an unreadable or corrupt cache behaves like
     an empty one rather than breaking plugin discovery.
+
+    Updates are a read-modify-write, and background tasks share a cache file, so
+    each path has a lock and each write lands through its own temporary file.
     """
 
     def __init__(self, path: Path, ttl: float) -> None:
         self.path = Path(path)
         self.ttl = ttl
+        self._lock = _cache_lock(self.path)
 
     def _read(self) -> Dict[str, Any]:
         """Return the cache payload, or an empty mapping when unusable."""
@@ -66,7 +88,7 @@ class JsonCache:
         """Persist the cache payload, ignoring filesystem failures."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_suffix(self.path.suffix + ".tmp")
+            temp = self.path.with_suffix(f"{self.path.suffix}.{uuid.uuid4().hex[:12]}.tmp")
             temp.write_text(json.dumps(payload), encoding="utf-8")
             temp.replace(self.path)
         except OSError:
@@ -89,16 +111,18 @@ class JsonCache:
 
     def set(self, key: str, value: Any) -> None:
         """Store *value* under *key* with the current timestamp."""
-        payload = self._read()
-        payload[self._key(key)] = {"ts": time.time(), "value": value}
-        self._write(payload)
+        with self._lock:
+            payload = self._read()
+            payload[self._key(key)] = {"ts": time.time(), "value": value}
+            self._write(payload)
 
     def clear(self) -> None:
         """Drop every cached record."""
-        try:
-            self.path.unlink()
-        except OSError:
-            return
+        with self._lock:
+            try:
+                self.path.unlink()
+            except OSError:
+                return
 
 
 def default_cache_dir() -> Path:
@@ -108,11 +132,78 @@ def default_cache_dir() -> Path:
     return Path(user_directory()) / "meta-binja" / "cache"
 
 
-def open_request(url: str, headers: Optional[Dict[str, str]] = None):
-    """Return an opened HTTPS response for *url* with Meta Binja's defaults."""
+def is_public_address(host: str) -> bool:
+    """Return whether every address *host* resolves to is publicly routable."""
+    try:
+        resolved = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, ValueError):
+        return False
+    if not resolved:
+        return False
+    for info in resolved:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            return False
+    return True
+
+
+def guard_public_url(url: str) -> None:
+    """Raise unless *url* is an HTTPS URL aimed at a public host.
+
+    README content comes from repositories Meta Binja does not control, so the
+    addresses it asks the plugin to fetch are checked before a request opens:
+    no credentials in the URL, and nothing pointed at loopback, link-local, or
+    otherwise private services on the user's network.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"refusing non-HTTPS request: {url}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("refusing request with embedded credentials")
+    host = parsed.hostname
+    if not host or not is_public_address(host):
+        raise ValueError(f"refusing request to non-public address: {host or url}")
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-check the destination on every redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Reject a redirect that leaves public HTTPS space."""
+        guard_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_public_opener: Optional[urllib.request.OpenerDirector] = None
+
+
+def open_request(url: str, headers: Optional[Dict[str, str]] = None, require_public: bool = False):
+    """Return an opened HTTPS response for *url* with Meta Binja's defaults.
+
+    ``require_public`` is set for URLs taken from repository content rather than
+    from the user: the destination, and every redirect it follows, must then be
+    a public HTTPS address.
+    """
+    global _public_opener
     combined = {"User-Agent": USER_AGENT}
     combined.update(headers or {})
-    return urllib.request.urlopen(urllib.request.Request(url, headers=combined), timeout=HTTP_TIMEOUT)
+    request = urllib.request.Request(url, headers=combined)
+    if not require_public:
+        return urllib.request.urlopen(request, timeout=HTTP_TIMEOUT)
+    guard_public_url(url)
+    if _public_opener is None:
+        _public_opener = urllib.request.build_opener(_PublicRedirectHandler)
+    return _public_opener.open(request, timeout=HTTP_TIMEOUT)
 
 
 def _github_headers() -> Dict[str, str]:
@@ -140,14 +231,19 @@ def absolutize_markdown(text: str, raw_base: Optional[str], html_base: Optional[
     if not raw_base and not html_base:
         return text
 
+    def _join(base: str, target: str) -> str:
+        # A leading slash means the repository root in GitHub-flavored Markdown,
+        # not the host root, so it resolves against the README's own base.
+        return urljoin(base, target.lstrip("/"))
+
     def _resolve(target: str, base: Optional[str]) -> str:
         cleaned = target.strip()
         if not cleaned or not base or _ABSOLUTE_TARGET_RE.match(cleaned):
             return target
         if cleaned.startswith("<") and cleaned.endswith(">"):
             inner = cleaned[1:-1]
-            return target if _ABSOLUTE_TARGET_RE.match(inner) else f"<{urljoin(base, inner)}>"
-        return urljoin(base, cleaned)
+            return target if _ABSOLUTE_TARGET_RE.match(inner) else f"<{_join(base, inner)}>"
+        return _join(base, cleaned)
 
     text = _MD_IMAGE_RE.sub(lambda m: f"{m.group(1)}{_resolve(m.group(2), raw_base)}{m.group(3)}", text)
     text = _MD_LINK_RE.sub(lambda m: f"{m.group(1)}{_resolve(m.group(2), html_base)}{m.group(3)}", text)

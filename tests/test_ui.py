@@ -42,6 +42,12 @@ def _sample_repositories():
                     version="0.4.0",
                 ),
                 FakeExtension(
+                    "Angr Import",
+                    description="Companion workflow for sigmaker output.",
+                    project_url="https://github.com/example/angr-import",
+                    version="0.9.0",
+                ),
+                FakeExtension(
                     "Debugger Helper",
                     description="Extra debugger glue.",
                     project_url="https://github.com/example/dbg",
@@ -121,10 +127,11 @@ class PanelTests(unittest.TestCase):
         panel.deleteLater()
 
     def test_search_ranks_name_matches_first(self):
-        """Typing a plugin name puts that plugin at the top of the table."""
+        """A name match outranks a description match that sorts before it."""
         panel = self._panel()
         panel.search.setText("sigmaker")
-        self.assertEqual(panel.table.topLevelItem(0).text(0), "Sigmaker")
+        names = [panel.table.topLevelItem(row).text(0) for row in range(panel.table.topLevelItemCount())]
+        self.assertEqual(names, ["Sigmaker", "Angr Import"])
         panel.deleteLater()
 
     def test_opening_an_entry_shows_the_detail_page(self):
@@ -167,9 +174,11 @@ class PanelTests(unittest.TestCase):
     def test_header_click_sorts_by_that_column(self):
         """Clicking a header takes ordering over from relevance ranking."""
         panel = self._panel()
+        before = [panel.table.topLevelItem(row).text(0) for row in range(panel.table.topLevelItemCount())]
         panel._sort_by_column(0)
-        names = [panel.table.topLevelItem(row).text(0) for row in range(panel.table.topLevelItemCount())]
-        self.assertEqual(names, sorted(names))
+        after = [panel.table.topLevelItem(row).text(0) for row in range(panel.table.topLevelItemCount())]
+        self.assertNotEqual(before, after)
+        self.assertEqual(after, sorted(before))
         panel.deleteLater()
 
     def test_readme_links_are_readable_on_dark_themes(self):
@@ -179,6 +188,38 @@ class PanelTests(unittest.TestCase):
         html = panel.readme.toHtml()
         self.assertIn("https://example.test/docs", html)
         self.assertNotIn("color:#0000ff", html.replace(" ", ""))
+        panel.deleteLater()
+
+    def test_confirmed_uninstall_removes_the_plugin(self):
+        """Confirming the prompt runs the uninstall and clears installed state."""
+        from unittest.mock import patch
+
+        from PySide6.QtWidgets import QMessageBox
+
+        panel = self._panel()
+        panel.search.setText("hashdb")
+        panel._open_item(panel.table.topLevelItem(0))
+        self._settle(panel)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            panel._install_or_uninstall()
+            self._settle(panel)
+        entry = panel.registry.search("hashdb")[0]
+        self.assertFalse(entry.installed)
+        self.assertFalse(entry.enabled)
+        panel.deleteLater()
+
+    def test_failed_action_restores_the_enabled_checkbox(self):
+        """A failed enable leaves the checkbox on the state actually applied."""
+        panel = self._panel()
+        panel.search.setText("hashdb")
+        panel._open_item(panel.table.topLevelItem(0))
+        self._settle(panel)
+        panel.registry.set_enabled = lambda _entry, _enabled: (_ for _ in ()).throw(RuntimeError("denied"))
+        panel.enabled.setChecked(False)
+        panel._toggle_enabled(False)
+        self._settle(panel)
+        self.assertTrue(panel.enabled.isChecked())
+        self.assertIn("failed", panel.status.text().lower())
         panel.deleteLater()
 
     def test_uninstall_asks_for_confirmation(self):

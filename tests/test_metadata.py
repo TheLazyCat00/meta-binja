@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import socket
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -21,6 +23,7 @@ from meta_binja.metadata import (
     absolutize_markdown,
     fetch_readme,
     fetch_repo_details,
+    guard_public_url,
     local_readme,
 )
 
@@ -51,6 +54,18 @@ class AbsolutizeTests(unittest.TestCase):
         out = absolutize_markdown('<img src="media/logo.png" width="60">', self.RAW, self.HTML)
         self.assertIn("https://raw.githubusercontent.com/owner/repo/HEAD/media/logo.png", out)
 
+    def test_root_relative_targets_stay_inside_the_repository(self):
+        """A leading slash means the repository root, not the host root."""
+        out = absolutize_markdown("![shot](/docs/shot.png)", self.RAW, self.HTML)
+        self.assertEqual(out, "![shot](https://raw.githubusercontent.com/owner/repo/HEAD/docs/shot.png)")
+        link = absolutize_markdown("[docs](/docs/usage.md)", self.RAW, self.HTML)
+        self.assertEqual(link, "[docs](https://github.com/owner/repo/blob/HEAD/docs/usage.md)")
+
+    def test_root_relative_angle_targets_are_resolved_too(self):
+        """Angle-bracket targets follow the same repository-root rule."""
+        out = absolutize_markdown("[x](</docs/a b.md>)", self.RAW, self.HTML)
+        self.assertEqual(out, "[x](<https://github.com/owner/repo/blob/HEAD/docs/a b.md>)")
+
     def test_titles_after_the_target_are_preserved(self):
         """A Markdown link title survives rewriting."""
         out = absolutize_markdown('[x](docs/a.md "Title")', self.RAW, self.HTML)
@@ -75,6 +90,31 @@ class JsonCacheTests(unittest.TestCase):
             time.sleep(0.02)
             self.assertIsNone(cache.get("key"))
 
+    def test_concurrent_writes_keep_every_record(self):
+        """Overlapping writers share a lock, so no cached record is lost."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "c.json"
+            writers = [JsonCache(path, 60) for _ in range(4)]
+            barrier = threading.Barrier(len(writers))
+
+            def _write(index):
+                cache = writers[index]
+                barrier.wait()
+                for item in range(10):
+                    cache.set(f"key-{index}-{item}", item)
+
+            threads = [threading.Thread(target=_write, args=(i,)) for i in range(len(writers))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            reader = JsonCache(path, 60)
+            for index in range(len(writers)):
+                for item in range(10):
+                    self.assertEqual(reader.get(f"key-{index}-{item}"), item)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
     def test_corrupt_cache_behaves_like_an_empty_one(self):
         """A damaged cache file never breaks plugin discovery."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -84,6 +124,43 @@ class JsonCacheTests(unittest.TestCase):
             self.assertIsNone(cache.get("key"))
             cache.set("key", "value")
             self.assertEqual(cache.get("key"), "value")
+
+
+class PublicUrlGuardTests(unittest.TestCase):
+    """Validate the destination check applied to repository-supplied URLs."""
+
+    @staticmethod
+    def _resolving(address):
+        """Return a getaddrinfo stub that resolves every host to *address*."""
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return lambda *_args, **_kwargs: [(family, socket.SOCK_STREAM, 6, "", (address, 443))]
+
+    def test_public_addresses_are_allowed(self):
+        """A host resolving to a routable address passes the guard."""
+        with patch("meta_binja.metadata.socket.getaddrinfo", self._resolving("93.184.216.34")):
+            guard_public_url("https://example.test/image.png")
+
+    def test_private_and_loopback_destinations_are_refused(self):
+        """Internal services are never fetched on a README's behalf."""
+        for address in ("127.0.0.1", "10.1.2.3", "192.168.0.5", "169.254.169.254", "::1", "fd00::1"):
+            with self.subTest(address=address):
+                with patch("meta_binja.metadata.socket.getaddrinfo", self._resolving(address)):
+                    with self.assertRaises(ValueError):
+                        guard_public_url("https://internal.test/image.png")
+
+    def test_unresolvable_hosts_are_refused(self):
+        """A host that does not resolve is refused rather than attempted."""
+        with patch("meta_binja.metadata.socket.getaddrinfo", side_effect=socket.gaierror("nope")):
+            with self.assertRaises(ValueError):
+                guard_public_url("https://nowhere.test/image.png")
+
+    def test_cleartext_and_credential_urls_are_refused(self):
+        """Non-HTTPS URLs and embedded credentials never reach the network."""
+        with patch("meta_binja.metadata.socket.getaddrinfo", self._resolving("93.184.216.34")):
+            with self.assertRaises(ValueError):
+                guard_public_url("http://example.test/image.png")
+            with self.assertRaises(ValueError):
+                guard_public_url("https://user:token@example.test/image.png")
 
 
 class ReadmeTests(unittest.TestCase):

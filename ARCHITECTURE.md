@@ -34,7 +34,10 @@ The UI owns a small thread pool. Refreshes, catalog downloads, README fetches,
 and every lifecycle action run there, and results return to the UI thread
 through signals; a stale result is discarded when the user has moved on. The
 panel keeps each task alive until it reports back, because a pool-owned
-runnable is destroyed with its signal sender.
+runnable is destroyed with its signal sender. A refresh rebuilds the shared
+registry, so one is dropped while another refresh or a lifecycle action is in
+flight. Cache updates are a read-modify-write, so they are serialized per cache
+path and each write lands through its own temporary file.
 
 ## Search behavior
 
