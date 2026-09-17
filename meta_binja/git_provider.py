@@ -38,9 +38,16 @@ def repo_name_from_url(value: str) -> str:
         except ValueError:
             path = value
     name = path.rstrip("/").rsplit("/", 1)[-1]
-    if name.endswith(".git"):
+    if name.lower().endswith(".git"):
         name = name[:-4]
     return name or "plugin"
+
+
+def _validated_activation_name(name: str) -> str:
+    """Validate a single directory component used as a Python plugin package."""
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError(f"Unsafe plugin activation name: {name!r}")
+    return name
 
 
 class GitProvider:
@@ -77,11 +84,8 @@ class GitProvider:
         if repo is not None:
             remembered = self._metadata_record(repo).get("activation_name")
             if remembered:
-                return remembered
-        name = repo_name_from_url(url)
-        if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
-            raise ValueError(f"Unsafe plugin activation name derived from repository URL: {name!r}")
-        return name
+                return _validated_activation_name(remembered)
+        return _validated_activation_name(repo_name_from_url(url))
 
     def active_path(self, url: str, repo: Optional[Path] = None) -> Path:
         """Return the public Binary Ninja plugin path for *url*."""
@@ -125,7 +129,7 @@ class GitProvider:
         record = dict(metadata.get(repo.name, {}))
         record["url"] = url
         if activation_name:
-            record["activation_name"] = activation_name
+            record["activation_name"] = _validated_activation_name(activation_name)
         metadata[repo.name] = record
         self._write_metadata(metadata)
 
@@ -264,7 +268,7 @@ class GitProvider:
         return True
 
     def install(self, entry) -> bool:
-        """Clone, install requirements, and activate an arbitrary Git plugin."""
+        """Clone and activate an arbitrary Git plugin."""
         if not entry.repo_url or not is_repo_url(entry.repo_url):
             return False
         repo = self.repo_path(entry.repo_url)
@@ -277,7 +281,6 @@ class GitProvider:
             if result.returncode != 0:
                 return False
         self._remember(entry.repo_url, repo)
-        self._install_requirements(repo)
         return self.set_enabled(entry, True)
 
     def uninstall(self, entry) -> bool:
@@ -300,13 +303,18 @@ class GitProvider:
             if not repo.exists():
                 return False
             if active.exists() or active.is_symlink():
-                if self._activation_owned_by(active, repo):
-                    self._remember(entry.repo_url, repo, active.name)
-                    return True
-                raise RuntimeError(
-                    f"Cannot enable {repo_name_from_url(entry.repo_url)}: {active} already exists "
-                    "and is not managed by Meta Binja"
-                )
+                if not self._activation_owned_by(active, repo):
+                    raise RuntimeError(
+                        f"Cannot enable {repo_name_from_url(entry.repo_url)}: {active} already exists "
+                        "and is not managed by Meta Binja"
+                    )
+                self._install_requirements(repo)
+                self._remember(entry.repo_url, repo, active.name)
+                return True
+
+            # Install dependencies before exposing the checkout. This also makes
+            # an explicit re-enable a safe retry after a previous pip failure.
+            self._install_requirements(repo)
             try:
                 os.symlink(repo, active, target_is_directory=True)
             except (OSError, NotImplementedError):
