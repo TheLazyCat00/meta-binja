@@ -87,7 +87,10 @@ def is_repo_url(value: str) -> bool:
         return False
     if value.startswith("git@"):
         return ":" in value
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
     if parsed.scheme.lower() not in {"https", "ssh"} or not parsed.hostname:
         return False
     if parsed.password is not None or (parsed.scheme.lower() == "https" and parsed.username is not None):
