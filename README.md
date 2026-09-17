@@ -11,7 +11,7 @@ Meta Binja brings Binary Ninja's official/community extensions, arbitrary Git re
 - Install, uninstall, enable, disable, and update official/community extensions using Binary Ninja's own `RepositoryManager` / `Extension` APIs.
 - Clone, update, enable/disable, and uninstall arbitrary Git-backed Python plugins.
 - Add extra discovery catalogs via `metaBinja.catalogSources` in Binary Ninja Settings.
-- Parse common Markdown "awesome list" links and simple JSON catalogs.
+- Accept a GitHub repository URL for an awesome-list directly, plus raw Markdown and simple JSON catalogs.
 - Deduplicate catalog results against native extensions by canonical repository URL.
 - Never automatically run arbitrary setup/install scripts from third-party repositories.
 
@@ -25,13 +25,15 @@ Open Binary Ninja Settings and search for **Meta Binja**. Add URLs under:
 
 `metaBinja.catalogSources`
 
-A raw Markdown awesome-list URL works, for example:
+For a GitHub-hosted awesome list, add the repository URL itself:
 
 ```text
-https://raw.githubusercontent.com/example/awesome-binja-plugins/main/README.md
+https://github.com/example/awesome-binja-plugins
 ```
 
-A simple JSON catalog is also supported:
+Meta Binja reads that repository's README through the GitHub API. Raw Markdown URLs are also supported.
+
+A simple JSON catalog is supported too:
 
 ```json
 {
