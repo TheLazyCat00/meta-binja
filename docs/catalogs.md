@@ -8,4 +8,6 @@ Supported MVP inputs:
 - A raw Markdown URL containing links to plugin repositories.
 - A JSON URL containing either an array or a `plugins` / `entries` array.
 
+Catalogs are cached on disk for six hours; Refresh re-reads them immediately. Set `GITHUB_TOKEN` in your environment to raise GitHub's API rate limit.
+
 Catalog entries do not override Binary Ninja-managed extensions. If the same repository appears in a native Extension Manager repository, the native entry wins and all lifecycle operations remain delegated to Binary Ninja.

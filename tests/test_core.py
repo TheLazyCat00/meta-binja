@@ -1,7 +1,6 @@
 """Regression tests for Meta Binja's provider and URL handling."""
 
 import json
-import sys
 import tempfile
 import types
 import unittest
@@ -9,47 +8,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-if "binaryninja" not in sys.modules:
-    binaryninja = types.ModuleType("binaryninja")
+try:
+    from tests.stubs import install_binaryninja
+except ImportError:  # pragma: no cover - direct ``python tests/test_core.py`` run
+    from stubs import install_binaryninja
 
-    class _RepositoryManager:
-        """Minimal RepositoryManager stub for tests outside Binary Ninja."""
-
-        repositories = []
-
-        def check_for_updates(self):
-            """Pretend native repository refresh succeeded."""
-            return True
-
-    class _Settings:
-        """Minimal Binary Ninja settings stub used by core imports."""
-
-        def register_group(self, *_args, **_kwargs):
-            """Accept a settings group registration."""
-            return True
-
-        def register_setting(self, *_args, **_kwargs):
-            """Accept a settings key registration."""
-            return True
-
-        def get_string_list(self, _key):
-            """Return no configured external catalogs by default."""
-            return []
-
-    binaryninja.RepositoryManager = _RepositoryManager
-    binaryninja.Settings = _Settings
-    binaryninja.log_warn = lambda *_args, **_kwargs: None
-    binaryninja.user_directory = lambda: tempfile.gettempdir()
-    sys.modules["binaryninja"] = binaryninja
+install_binaryninja()
 
 from meta_binja.core import (
+    FILTER_AVAILABLE,
+    FILTER_INSTALLED,
+    FILTER_UPDATES,
     CatalogProvider,
     GitProvider,
+    PluginEntry,
     PluginSource,
     canonical_repo_url,
     is_repo_url,
+    matches_filter,
+    relevance,
     repo_name_from_url,
 )
+from meta_binja.metadata import JsonCache
 
 
 class UrlTests(unittest.TestCase):
@@ -199,6 +179,107 @@ class GitProviderTests(unittest.TestCase):
                 entry = types.SimpleNamespace(repo_url=url)
                 self.assertFalse(provider.install(entry))
                 run.assert_not_called()
+
+
+def _entry(name, **kwargs):
+    """Build a catalog entry for presentation and filtering tests."""
+    defaults = {"id": f"test:{name}", "name": name, "source": PluginSource.CATALOG}
+    defaults.update(kwargs)
+    return PluginEntry(**defaults)
+
+
+class PresentationTests(unittest.TestCase):
+    """Validate that source and lifecycle status stay independent facts."""
+
+    def test_status_is_independent_of_source(self):
+        """An installed native plugin reports its source and its state separately."""
+        entry = _entry("Native plugin", source=PluginSource.NATIVE, installed=True, enabled=True)
+        self.assertEqual(entry.source_label, "Native")
+        self.assertEqual(entry.status_kind, "enabled")
+        self.assertEqual(entry.status_label, "Enabled")
+
+    def test_status_kinds_cover_every_lifecycle_state(self):
+        """Each combination of installed/enabled/update maps to one status."""
+        self.assertEqual(_entry("a").status_kind, "available")
+        self.assertEqual(_entry("b", installed=True).status_kind, "disabled")
+        self.assertEqual(_entry("c", installed=True, enabled=True).status_kind, "enabled")
+        self.assertEqual(
+            _entry("d", installed=True, enabled=True, update_available=True).status_kind, "update"
+        )
+
+    def test_update_flag_on_uninstalled_entry_is_not_a_status(self):
+        """A stale update flag never makes an uninstalled plugin look installed."""
+        self.assertEqual(_entry("e", update_available=True).status_kind, "available")
+
+
+class FilterTests(unittest.TestCase):
+    """Validate the list filters and search ranking."""
+
+    def test_filters_select_the_expected_entries(self):
+        """Each filter keeps only the entries it names."""
+        available = _entry("available")
+        installed = _entry("installed", installed=True, enabled=True)
+        outdated = _entry("outdated", installed=True, enabled=True, update_available=True)
+        self.assertTrue(matches_filter(installed, FILTER_INSTALLED))
+        self.assertFalse(matches_filter(available, FILTER_INSTALLED))
+        self.assertTrue(matches_filter(outdated, FILTER_UPDATES))
+        self.assertFalse(matches_filter(installed, FILTER_UPDATES))
+        self.assertTrue(matches_filter(available, FILTER_AVAILABLE))
+        self.assertFalse(matches_filter(outdated, FILTER_AVAILABLE))
+
+    def test_name_matches_outrank_description_matches(self):
+        """A name hit ranks above an entry that only mentions the term."""
+        named = _entry("HashDB")
+        described = _entry("Other", description="works with hashdb lookups")
+        tokens = ["hashdb"]
+        self.assertLess(relevance(named, tokens), relevance(described, tokens))
+
+    def test_exact_and_prefix_matches_rank_first(self):
+        """An exact name beats a prefix match, which beats a substring match."""
+        tokens = ["hash"]
+        self.assertLess(relevance(_entry("hash"), tokens), relevance(_entry("hashdb"), tokens))
+        self.assertLess(relevance(_entry("hashdb"), tokens), relevance(_entry("my hash tool"), tokens))
+
+
+class CatalogCacheTests(unittest.TestCase):
+    """Validate that catalogs are served from the TTL cache between refreshes."""
+
+    def test_second_load_is_served_from_cache(self):
+        """A cached catalog is reused instead of refetched."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = JsonCache(Path(temp_dir) / "catalogs.json", 3600)
+            calls = []
+
+            def _fetch():
+                calls.append(1)
+                return json.dumps(["https://github.com/example/one"]), "application/json"
+
+            first = CatalogProvider("https://example.test/catalog", cache)
+            first._fetch = _fetch
+            second = CatalogProvider("https://example.test/catalog", cache)
+            second._fetch = _fetch
+
+            self.assertEqual(len(first.entries()), 1)
+            self.assertEqual(len(second.entries()), 1)
+            self.assertEqual(len(calls), 1)
+
+    def test_forced_load_bypasses_the_cache(self):
+        """An explicit refresh refetches even when a cached copy exists."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = JsonCache(Path(temp_dir) / "catalogs.json", 3600)
+            calls = []
+
+            def _fetch():
+                calls.append(1)
+                return json.dumps(["https://github.com/example/one"]), "application/json"
+
+            cached = CatalogProvider("https://example.test/catalog", cache)
+            cached._fetch = _fetch
+            cached.entries()
+            forced = CatalogProvider("https://example.test/catalog", cache, force=True)
+            forced._fetch = _fetch
+            forced.entries()
+            self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

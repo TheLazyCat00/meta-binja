@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+- Plugin pages now lead with the repository's README, rendered from Markdown
+  with relative links and images resolved, plus star count, license, and last
+  push date where the host provides them.
+- Results are a sortable table with separate Source and Status columns, color
+  coded, instead of a status line beneath each name.
+- Added a filter for installed/outdated/not-installed plugins and a result
+  count, and ranked search results by name matches.
+- Moved Git and network work off the UI thread, and cached catalogs, READMEs,
+  and repository facts on disk with a per-kind TTL.
+- Added a standalone manager window, repository open/copy actions, keyboard
+  shortcuts, an inline status line, and a confirmation before uninstalling.
+- Added headless Qt tests and Binary Ninja stubs so the suite runs with
+  `python3 -m unittest discover`.
+
 ## 0.1.0
 
 Initial MVP:

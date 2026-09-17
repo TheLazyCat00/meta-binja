@@ -1,3 +1,8 @@
-# MVP
+# Scope
 
-The MVP intentionally prioritizes the unified management model and safe lifecycle boundaries over polish. The next implementation pass should focus on asynchronous operations, richer details rendering, and integration fixes discovered during hands-on Binary Ninja testing.
+Meta Binja prioritizes a unified management model and safe lifecycle boundaries.
+Discovery, presentation, and lifecycle control live behind provider boundaries so
+that native extensions keep Binary Ninja's own semantics while arbitrary Git
+repositories and third-party catalogs are handled separately.
+
+Remaining work is tracked in [roadmap.md](roadmap.md).

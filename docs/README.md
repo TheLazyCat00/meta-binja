@@ -2,6 +2,7 @@
 
 - [Architecture](../ARCHITECTURE.md)
 - [Catalogs](catalogs.md)
+- [Repository metadata](metadata.md)
 - [Security](security.md)
 - [Development](development.md)
 - [Testing](testing.md)

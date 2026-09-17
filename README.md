@@ -4,8 +4,16 @@ A replacement-style plugin manager for Binary Ninja.
 
 Meta Binja brings Binary Ninja's official/community extensions, arbitrary Git repositories, and third-party plugin lists into one searchable interface.
 
-## MVP features
+## Features
 
+- Unified, sortable plugin table: name, version, source, and lifecycle status in
+  separate columns.
+- Plugin pages lead with the repository's README, rendered from Markdown with
+  working links and images.
+- Filter by installed, outdated, or not-installed plugins, and rank search
+  results by name matches.
+- Git and network work runs off the UI thread, with catalogs, READMEs, and
+  repository facts cached on disk.
 - Unified search across Binary Ninja's configured Extension Manager repositories.
 - Paste a Git repository URL directly into search to open its management page.
 - Install, uninstall, enable, disable, and update official/community extensions using Binary Ninja's own `RepositoryManager` / `Extension` APIs.
@@ -17,7 +25,11 @@ Meta Binja brings Binary Ninja's official/community extensions, arbitrary Git re
 
 ## Installation
 
-Clone this repository into Binary Ninja's user plugin directory, then restart Binary Ninja and open the **Meta Binja** sidebar.
+Clone this repository into Binary Ninja's user plugin directory, then restart
+Binary Ninja and open the **Meta Binja** sidebar. For more room, open
+**Plugins → Meta Binja → Open Plugin Manager** for a standalone window.
+
+Keyboard: `Ctrl+F` focuses search, `Esc` leaves a plugin page, `F5` refreshes.
 
 ## Additional plugin catalogs
 
@@ -31,7 +43,9 @@ For a GitHub-hosted awesome list, add the repository URL itself:
 https://github.com/example/awesome-binja-plugins
 ```
 
-Meta Binja reads that repository's README through the GitHub API. Raw Markdown URLs are also supported.
+Meta Binja reads that repository's README through the GitHub API. Raw Markdown
+URLs are also supported. Set `GITHUB_TOKEN` in your environment to raise
+GitHub's unauthenticated API rate limit.
 
 A simple JSON catalog is supported too:
 
@@ -63,9 +77,17 @@ Installing a Binary Ninja plugin means trusting code that Binary Ninja may impor
 
 ## Current limitations
 
-- Git and network operations are synchronous in the initial MVP.
 - Git-backed dependency installation is intentionally manual.
 - Native/C++ build pipelines are not automated.
 - Windows activation falls back to copying when symlink creation is unavailable.
+- README retrieval covers GitHub, GitLab, Bitbucket, and Gitea/Forgejo hosts.
+
+## Development
+
+Run the tests from the repository root:
+
+```sh
+python3 -m unittest discover
+```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.

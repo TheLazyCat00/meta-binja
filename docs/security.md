@@ -9,4 +9,6 @@ The Git provider deliberately limits automation:
 - Python dependency installation for Git-backed plugins is manual in the MVP.
 - Native Binary Ninja extensions keep using Binary Ninja's own Extension Manager lifecycle and dependency handling.
 
+Rendered READMEs come from remote repositories. Links open in the system browser only when clicked, and images are fetched over HTTPS only, bounded in count and size.
+
 Catalogs are discovery-only and cannot override a native extension that resolves to the same canonical repository URL.
