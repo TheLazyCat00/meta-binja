@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Iterable, List, Set
 
 from . import core as _core
+from . import git_provider as _git_provider
 
 _HTML_TAGS = {
     "a", "abbr", "b", "blockquote", "br", "caption", "code", "col", "colgroup",
@@ -17,6 +19,43 @@ _HTML_TAGS = {
 }
 _BARE_ANGLE_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9_-]*)(/?)>")
 _PLUGIN_KEY_RE = re.compile(r"[\s._-]+")
+_CREATE_NO_WINDOW = 0x08000000
+
+
+class _HiddenConsoleSubprocess:
+    """Proxy ``subprocess`` so child console programs stay hidden on Windows.
+
+    Binary Ninja is a GUI process. Launching Git from it with the default
+    Windows creation flags briefly creates a console window for every command,
+    which is especially noticeable during startup when several worktrees are
+    inspected in sequence. The proxy is local to Meta Binja's modules; it does
+    not monkeypatch Python's global ``subprocess`` module or other plugins.
+    """
+
+    _meta_binja_hidden_console = True
+
+    def __init__(self, module: object) -> None:
+        self._module = module
+
+    def run(self, *args, **kwargs):
+        """Delegate to ``subprocess.run`` with ``CREATE_NO_WINDOW`` on Windows."""
+        if os.name == "nt":
+            no_window = getattr(self._module, "CREATE_NO_WINDOW", _CREATE_NO_WINDOW)
+            kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | int(no_window)
+        return self._module.run(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        """Expose the rest of the wrapped subprocess module unchanged."""
+        return getattr(self._module, name)
+
+
+def install_subprocess_fixes() -> None:
+    """Route Meta Binja's Git subprocesses through the hidden-console proxy."""
+    for module in (_core, _git_provider):
+        current = getattr(module, "subprocess", None)
+        if current is None or getattr(current, "_meta_binja_hidden_console", False):
+            continue
+        module.subprocess = _HiddenConsoleSubprocess(current)
 
 
 def register_settings() -> None:
@@ -133,7 +172,8 @@ def _managed_activation_names(registry: object) -> Set[str]:
 
 
 def install_core_fixes() -> None:
-    """Install settings registration and registry deduplication exactly once."""
+    """Install settings, subprocess, and registry integration fixes exactly once."""
+    install_subprocess_fixes()
     _core.register_settings = register_settings
 
     registry_type = _core.PluginRegistry
