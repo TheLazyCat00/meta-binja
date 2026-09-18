@@ -111,6 +111,49 @@ class NativeProviderHandoffTests(unittest.TestCase):
         self.assertFalse(extension.enabled)
         self.assertFalse(entry.native_installed)
 
+    def test_failed_native_uninstall_restores_enabled_state_on_main_thread(self):
+        """A failed handoff restores an enabled native extension before reporting failure."""
+        calls = []
+
+        class Extension:
+            installed = True
+            enabled = True
+
+            def enable(self):
+                calls.append("enable")
+                self.enabled = True
+                return True
+
+            def uninstall(self):
+                calls.append("uninstall")
+                return False
+
+        entry = types.SimpleNamespace(
+            backend=Extension(),
+            native_installed=True,
+            name="Calltree",
+        )
+
+        def execute(callback):
+            calls.append("main-thread")
+            callback()
+
+        with patch.object(native_provider, "is_main_thread", return_value=False), patch.object(
+            native_provider, "execute_on_main_thread_and_wait", side_effect=execute
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Could not remove existing native install"):
+                meta_core.NativeProvider.prepare_git_handoff(entry)
+
+        self.assertTrue(entry.backend.enabled)
+        self.assertEqual(
+            calls,
+            [
+                "main-thread",  # disable
+                "main-thread", "uninstall",
+                "main-thread", "enable",
+            ],
+        )
+
     def test_handoff_is_noop_when_native_copy_is_absent(self):
         """Fresh source-backed installs never touch the native lifecycle."""
         calls = []
