@@ -16,8 +16,8 @@ Meta Binja brings Binary Ninja's official/community extensions, arbitrary Git re
   repository facts cached on disk.
 - Unified search across Binary Ninja's configured Extension Manager repositories.
 - Paste a Git repository URL directly into search to open its management page.
-- Use Binary Ninja's Extension Manager repositories as discovery catalogs, then clone source-backed Python official/community plugins through the same Git lifecycle as direct repository installs.
-- Clone, update, enable/disable, and uninstall Git-backed Python plugins, including catalog entries with plugin subdirectories.
+- Install, uninstall, enable, disable, and update official/community extensions using Binary Ninja's own `RepositoryManager` / `Extension` APIs.
+- Clone, update, enable/disable, and uninstall arbitrary Git-backed Python plugins.
 - Add extra discovery catalogs via `metaBinja.catalogSources` in Binary Ninja Settings.
 - Accept a GitHub repository URL for an awesome-list directly, plus raw Markdown and simple JSON catalogs.
 - Deduplicate catalog results against native extensions by canonical repository URL.
@@ -69,7 +69,7 @@ Paste a repository URL into Meta Binja's search field:
 https://github.com/example/my-binja-plugin
 ```
 
-If the URL matches a Binary Ninja catalog entry, Meta Binja keeps that catalog metadata but uses the same Git-backed lifecycle as a direct repository install. Compiled/prebuilt or package-only extensions that are not clone-and-run Python plugins fall back to Binary Ninja's native lifecycle.
+If the URL matches a Binary Ninja-managed extension, Meta Binja keeps using the native lifecycle. Otherwise it opens a Git-backed management page.
 
 ## Security model
 
@@ -77,8 +77,8 @@ Installing a Binary Ninja plugin means trusting code that Binary Ninja may impor
 
 ## Current limitations
 
-- `requirements.txt` dependencies are installed through Binary Ninja's configured Python environment before activation and after updates.
-- Package/build pipelines that require generated release artifacts or native compilation still fall back to Binary Ninja's Extension Manager when no clonable project URL is available.
+- Git-backed dependency installation is intentionally manual.
+- Native/C++ build pipelines are not automated.
 - Windows activation falls back to copying when symlink creation is unavailable.
 - README retrieval covers GitHub, GitLab, Bitbucket, and Gitea/Forgejo hosts.
 
@@ -87,7 +87,7 @@ Installing a Binary Ninja plugin means trusting code that Binary Ninja may impor
 Run the tests from the repository root:
 
 ```sh
-python3 -m unittest discover -s tests
+python3 -m unittest discover
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
