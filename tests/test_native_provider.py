@@ -58,6 +58,45 @@ class NativeProviderInstallTests(unittest.TestCase):
         self.assertFalse(meta_core.NativeProvider.install(entry))
 
 
+class NativeProviderHandoffTests(unittest.TestCase):
+    """Validate one-time cleanup when a native install moves to Git ownership."""
+
+    def test_handoff_disables_and_uninstalls_existing_native_copy(self):
+        """An old native install is removed before the Git-managed copy is activated."""
+        extension = FakeExtension("Calltree", installed=True, enabled=True)
+        entry = types.SimpleNamespace(
+            backend=extension,
+            native_installed=True,
+            name="Calltree",
+        )
+
+        self.assertTrue(meta_core.NativeProvider.prepare_git_handoff(entry))
+        self.assertFalse(extension.installed)
+        self.assertFalse(extension.enabled)
+        self.assertFalse(entry.native_installed)
+
+    def test_handoff_is_noop_when_native_copy_is_absent(self):
+        """Fresh source-backed installs never touch the native lifecycle."""
+        calls = []
+
+        class Extension:
+            installed = False
+            enabled = False
+
+            def uninstall(self):
+                calls.append("uninstall")
+                return True
+
+        entry = types.SimpleNamespace(
+            backend=Extension(),
+            native_installed=False,
+            name="Calltree",
+        )
+
+        self.assertTrue(meta_core.NativeProvider.prepare_git_handoff(entry))
+        self.assertEqual(calls, [])
+
+
 class NativeProviderThreadingTests(unittest.TestCase):
     """Native activation must execute on Binary Ninja's registered main thread."""
 
