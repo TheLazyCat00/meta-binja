@@ -208,12 +208,15 @@ class RegistryLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.handoffs = []
                 self.installs = []
+                self.handoff_error = None
 
             def entries(self):
                 return list(native_entries)
 
             def prepare_git_handoff(self, entry):
                 self.handoffs.append(entry)
+                if self.handoff_error is not None:
+                    raise self.handoff_error
                 return True
 
             def install(self, entry):
@@ -226,6 +229,7 @@ class RegistryLifecycleTests(unittest.TestCase):
                 self.prepared = []
                 self.enabled = []
                 self.prepare_result = True
+                self.enable_error = None
 
             def entries(self, check_updates=False):
                 return list(git_entries)
@@ -236,6 +240,8 @@ class RegistryLifecycleTests(unittest.TestCase):
 
             def set_enabled(self, entry, enabled, install_requirements=True):
                 self.enabled.append((entry, enabled, install_requirements))
+                if self.enable_error is not None and enabled:
+                    raise self.enable_error
                 return True
 
             def install(self, entry):
@@ -269,6 +275,33 @@ class RegistryLifecycleTests(unittest.TestCase):
         self.assertFalse(native.installed)
         self.assertFalse(native.enabled)
         self.assertTrue(native.native_installed)
+
+    def test_native_only_catalog_entry_does_not_hide_matching_direct_git_checkout(self):
+        """Compiled/native-only entries and direct Git installs remain independently manageable."""
+        native = PluginEntry(
+            id="native:community:compiled",
+            name="Compiled",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/example/compiled",
+            installed=True,
+            enabled=True,
+            git_installable=False,
+        )
+        git = PluginEntry(
+            id="git:https://github.com/example/compiled",
+            name="compiled",
+            source=PluginSource.GIT,
+            repo_url="https://github.com/example/compiled",
+            installed=True,
+            enabled=True,
+        )
+        registry = self._registry([native], [git])
+
+        entries = registry.refresh()
+
+        self.assertIn(native, entries)
+        self.assertIn(git, entries)
+        self.assertEqual(len(entries), 2)
 
     def test_git_state_is_overlaid_on_native_catalog_metadata(self):
         """Installed source-backed plugins keep native metadata but use Git lifecycle state."""
@@ -316,10 +349,53 @@ class RegistryLifecycleTests(unittest.TestCase):
         self.assertTrue(registry.install(entry))
 
         self.assertEqual(registry.git.prepared, [entry])
+        self.assertEqual(registry.git.enabled, [(entry, True, False)])
         self.assertEqual(registry.native.handoffs, [entry])
         self.assertEqual(registry.native.installs, [])
         self.assertEqual(registry.git.installs, [])
+
+    def test_failed_git_activation_keeps_existing_native_install(self):
+        """Git activation failure happens before native cleanup begins."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.git.enable_error = RuntimeError("activation failed")
+
+        with self.assertRaisesRegex(RuntimeError, "activation failed"):
+            registry.install(entry)
+
+        self.assertEqual(registry.git.prepared, [entry])
         self.assertEqual(registry.git.enabled, [(entry, True, False)])
+        self.assertEqual(registry.native.handoffs, [])
+
+    def test_failed_native_cleanup_rolls_back_git_activation(self):
+        """Native cleanup failure removes the newly activated Git copy."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.native.handoff_error = RuntimeError("native cleanup failed")
+
+        with self.assertRaisesRegex(RuntimeError, "native cleanup failed"):
+            registry.install(entry)
+
+        self.assertEqual(registry.native.handoffs, [entry])
+        self.assertEqual(
+            registry.git.enabled,
+            [
+                (entry, True, False),
+                (entry, False, False),
+            ],
+        )
 
     def test_failed_git_preflight_keeps_existing_native_install(self):
         """A clone/preflight failure happens before native migration cleanup."""
