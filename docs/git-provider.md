@@ -6,7 +6,7 @@ Direct installs accept HTTPS and SSH repository URLs. Cleartext HTTP URLs and UR
 
 Checkouts live in Meta Binja's private repository store. Enabled plugins are exposed from Binary Ninja's normal user plugin directory using the repository's case-preserving basename.
 
-If Binary Ninja's catalog provides a plugin `subdir`, Meta Binja activates that directory instead of the repository root. This supports monorepos such as entries whose Binary Ninja integration lives under `binjastub` or another nested path. The subdirectory is validated as repository-relative and persisted in `managed.json`.
+If Binary Ninja's catalog provides a plugin `subdir`, Meta Binja creates a tiny wrapper package in the user plugin directory. The wrapper keeps the repository root on Python's search path and imports the declared nested module, mirroring Binary Ninja's native `module.subdir` loading behavior. The subdirectory is validated as repository-relative and persisted in `managed.json`.
 
 The provider prefers directory symlinks and falls back to a transactionally replaced copy where symlink creation is unavailable. Updates use `git pull --ff-only --recurse-submodules`; local divergence is never overwritten automatically.
 
