@@ -4,7 +4,7 @@ Meta Binja presents a single plugin-management UI while keeping lifecycle behavi
 
 ## Native extensions
 
-`NativeProvider` wraps Binary Ninja's public `RepositoryManager` / `Extension` API. Official and community extensions remain owned by Binary Ninja, so install/uninstall, dependency handling, enable/disable, and update semantics stay consistent with the native manager.
+`NativeProvider` wraps Binary Ninja's public `RepositoryManager` / `Extension` API. Official and community extensions remain owned by Binary Ninja, so install/uninstall, dependency handling, enable/disable, and update semantics stay consistent with the native manager. Meta Binja records both configured enablement and the current-process `running` state; an enabled native extension that is not running is shown as **Not loaded** instead of being reported as active.
 
 ## Arbitrary Git repositories
 
@@ -46,7 +46,10 @@ extension activation and deactivation are the exception: Binary Ninja may load
 or unload plugin code as part of those calls, so `NativeProvider` marshals them
 through `execute_on_main_thread_and_wait` onto Binary Ninja's registered main
 thread. Installation/download work stays on the worker to avoid blocking the
-UI. The panel keeps each task alive until it reports back, because a pool-owned
+UI. After installation the provider re-resolves the Extension from
+`RepositoryManager` before enabling it, and it verifies the persisted `enabled`
+state rather than requiring a successful live load. This matches Binary Ninja's
+documented install -> enable -> restart lifecycle. The panel keeps each task alive until it reports back, because a pool-owned
 runnable is destroyed with its signal sender. A refresh rebuilds the shared
 registry, so one is dropped while another refresh or a lifecycle action is in
 flight. Cache updates are a read-modify-write, so they are serialized per cache
