@@ -4,9 +4,9 @@ Meta Binja presents a single plugin-management UI while keeping lifecycle behavi
 
 ## Native/community discovery
 
-`NativeProvider` uses Binary Ninja's public `RepositoryManager` / `Extension` API as a discovery source. For entries with a clonable `project_url`, Meta Binja keeps the native catalog's name, description, version, repository URL, and `subdir`, but lifecycle state comes from `GitProvider`. Existing native-manager installs are disabled/uninstalled once during the handoff so the native package cannot conflict with the Git-managed checkout.
+`NativeProvider` uses Binary Ninja's public `RepositoryManager` / `Extension` API as a discovery source. For Python entries with a clonable `project_url`, Meta Binja keeps the native catalog's name, description, version, repository URL, and `subdir`, but lifecycle state comes from `GitProvider`. Existing native-manager installs are disabled/uninstalled once during the handoff so the native package cannot conflict with the Git-managed checkout.
 
-Extensions without a clonable project URL retain Binary Ninja's native lifecycle as a fallback for package-only/prebuilt releases.
+Non-Python, compiled/prebuilt, or package-only extensions retain Binary Ninja's native lifecycle even when their metadata links to a source repository.
 
 ## Git lifecycle
 
