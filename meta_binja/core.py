@@ -748,7 +748,10 @@ class PluginRegistry:
         """Install through Git when a source repository exists, otherwise fall back to native."""
         if self._uses_git_lifecycle(entry):
             if entry.source is PluginSource.NATIVE:
+                if not self.git.prepare_install(entry):
+                    return False
                 self.native.prepare_git_handoff(entry)
+                return self.git.set_enabled(entry, True, install_requirements=False)
             return self.git.install(entry)
         return self.native.install(entry)
 
