@@ -370,7 +370,13 @@ class RegistryLifecycleTests(unittest.TestCase):
             registry.install(entry)
 
         self.assertEqual(registry.git.prepared, [entry])
-        self.assertEqual(registry.git.enabled, [(entry, True, False)])
+        self.assertEqual(
+            registry.git.enabled,
+            [
+                (entry, True, False),
+                (entry, False, False),
+            ],
+        )
         self.assertEqual(registry.native.handoffs, [])
 
     def test_failed_native_cleanup_rolls_back_git_activation(self):
