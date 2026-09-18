@@ -1,6 +1,6 @@
 # Git-backed plugins
 
-Meta Binja uses one Git lifecycle for direct repository installs and source-backed plugins discovered through Binary Ninja's native/community catalogs.
+Meta Binja uses one Git lifecycle for direct repository installs and source-backed Python plugins discovered through Binary Ninja's native/community catalogs.
 
 Direct installs accept HTTPS and SSH repository URLs. Cleartext HTTP URLs and URLs containing embedded web credentials are rejected before cloning or persistence; private repositories should use Git's external credential or SSH configuration instead.
 
