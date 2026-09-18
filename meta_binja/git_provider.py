@@ -514,6 +514,10 @@ class GitProvider:
         Native-to-Git migration uses this phase before removing the old native
         package, so clone, subdirectory, dependency, and activation-name
         failures cannot leave the user with neither installation.
+
+        Existing activation ownership is checked against currently persisted
+        metadata. A catalog changing install_subdir must not make an otherwise
+        owned activation look foreign before it can be rebuilt.
         """
         if not entry.repo_url or not is_repo_url(entry.repo_url):
             return False
@@ -530,7 +534,10 @@ class GitProvider:
 
         install_subdir = _validated_subdir(getattr(entry, "install_subdir", None))
         source = self._activation_source(repo, install_subdir)
-        self._remember(entry.repo_url, repo, install_subdir=install_subdir or "")
+
+        # Persist the source URL, but leave previous subdir metadata untouched
+        # until activation has been rebuilt successfully for the new layout.
+        self._remember(entry.repo_url, repo)
 
         active = self.active_path(entry.repo_url, repo)
         if (active.exists() or active.is_symlink()) and not self._activation_owned_by(active, repo):
@@ -560,9 +567,11 @@ class GitProvider:
         """Expose or hide a managed checkout in Binary Ninja's plugin directory."""
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
+        previous_subdir = _validated_subdir(self._metadata_record(repo).get("install_subdir"))
         install_subdir = self._entry_subdir(entry, repo)
-        if install_subdir:
-            self._remember(entry.repo_url, repo, install_subdir=install_subdir)
+
+        # Resolve and verify the existing activation before changing subdir
+        # metadata, otherwise a legitimate old activation can appear foreign.
         active = self._migrate_legacy_activation(entry.repo_url, repo)
         legacy = self._legacy_active_path(repo)
         if enabled:
@@ -581,9 +590,22 @@ class GitProvider:
                 except Exception:
                     self._remove_managed_activation(active, repo)
                     raise
-                if install_subdir:
-                    self._subdir_activation_transactionally(repo, active, install_subdir)
-                self._remember(entry.repo_url, repo, active.name, install_subdir=install_subdir)
+
+                if install_subdir != previous_subdir:
+                    if install_subdir:
+                        self._subdir_activation_transactionally(repo, active, install_subdir)
+                    else:
+                        # Moving from a nested wrapper back to the repository
+                        # root uses the transactional copy path so a failed
+                        # swap cannot destroy the old activation.
+                        self._copy_activation_transactionally(repo, active, source)
+
+                self._remember(
+                    entry.repo_url,
+                    repo,
+                    active.name,
+                    install_subdir=install_subdir or "",
+                )
                 return True
 
             if install_requirements:
@@ -595,7 +617,12 @@ class GitProvider:
                     os.symlink(source, active, target_is_directory=True)
                 except (OSError, NotImplementedError):
                     self._copy_activation_transactionally(repo, active, source)
-            self._remember(entry.repo_url, repo, active.name, install_subdir=install_subdir)
+            self._remember(
+                entry.repo_url,
+                repo,
+                active.name,
+                install_subdir=install_subdir or "",
+            )
             return True
 
         self._remove_managed_activation(active, repo)
@@ -628,6 +655,14 @@ class GitProvider:
                 self._subdir_activation_transactionally(repo, active, install_subdir)
             elif not active.is_symlink():
                 self._copy_activation_transactionally(repo, active, source)
+            self._remember(
+                entry.repo_url,
+                repo,
+                active.name,
+                install_subdir=install_subdir or "",
+            )
+        elif not (active.exists() or active.is_symlink()):
+            self._remember(entry.repo_url, repo, install_subdir=install_subdir or "")
         return True
 
     @staticmethod
