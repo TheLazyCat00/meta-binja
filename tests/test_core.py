@@ -314,6 +314,23 @@ class RegistryLifecycleTests(unittest.TestCase):
         self.assertEqual(registry.git.installs, [])
 
 
+    def test_compiled_native_entry_with_repo_url_keeps_native_fallback(self):
+        """Compiled/prebuilt extensions are not treated as clone-and-run Python plugins."""
+        entry = PluginEntry(
+            id="native:community:compiled",
+            name="Compiled",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/example/compiled",
+            git_installable=False,
+        )
+        registry = self._registry([], [])
+
+        self.assertTrue(registry.install(entry))
+
+        self.assertEqual(registry.native.installs, [entry])
+        self.assertEqual(registry.git.installs, [])
+
+
 class PresentationTests(unittest.TestCase):
     """Validate that source and lifecycle status stay independent facts."""
 
