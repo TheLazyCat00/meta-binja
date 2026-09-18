@@ -30,7 +30,6 @@ def _sample_repositories():
                 FakeExtension(
                     "HashDB",
                     description="Hash lookup service client.",
-                    project_url="https://github.com/example/hashdb",
                     installed=True,
                     enabled=True,
                     version="2.1.0",
@@ -38,19 +37,16 @@ def _sample_repositories():
                 FakeExtension(
                     "Sigmaker",
                     description="Signature generation.",
-                    project_url="https://github.com/example/sigmaker",
                     version="0.4.0",
                 ),
                 FakeExtension(
                     "Angr Import",
                     description="Companion workflow for sigmaker output.",
-                    project_url="https://github.com/example/angr-import",
                     version="0.9.0",
                 ),
                 FakeExtension(
                     "Debugger Helper",
                     description="Extra debugger glue.",
-                    project_url="https://github.com/example/dbg",
                     installed=True,
                     enabled=True,
                     update_available=True,
