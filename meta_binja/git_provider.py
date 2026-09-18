@@ -312,8 +312,13 @@ class GitProvider:
         if package_init:
             wrapper_lines.extend([
                 f"_PACKAGE_INIT = {package_init!r}",
-                "with open(_PACKAGE_INIT, 'rb') as _file:",
-                "    exec(compile(_file.read(), _PACKAGE_INIT, 'exec'), globals(), globals())",
+                "_WRAPPER_FILE = globals().get('__file__')",
+                "__file__ = _PACKAGE_INIT",
+                "try:",
+                "    with open(_PACKAGE_INIT, 'rb') as _file:",
+                "        exec(compile(_file.read(), _PACKAGE_INIT, 'exec'), globals(), globals())",
+                "finally:",
+                "    __file__ = _WRAPPER_FILE",
             ])
         if subdir_parts:
             dotted_subdir = ".".join(subdir_parts)
