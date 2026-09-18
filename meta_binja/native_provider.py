@@ -49,20 +49,40 @@ class NativeProvider(_core.NativeProvider):
         Extension Manager. Existing native installs from older Meta Binja
         versions are disabled and uninstalled once so Binary Ninja cannot load
         both the native package and the Git-managed checkout on restart.
+
+        The caller activates the Git copy first. If native cleanup fails, this
+        method restores the prior enabled state before reporting failure so the
+        caller can remove the Git activation without leaving the plugin unusable.
         """
         backend = entry.backend
         installed = bool(getattr(backend, "installed", False) or getattr(entry, "native_installed", False))
         if not installed:
             return True
 
-        if bool(getattr(backend, "enabled", False)):
+        was_enabled = bool(getattr(backend, "enabled", False))
+
+        def restore_enabled() -> None:
+            if not was_enabled:
+                return
+            if not bool(_on_main_thread(backend.enable)):
+                raise RuntimeError(f"Could not restore native extension {entry.name} after failed migration")
+
+        if was_enabled:
             def disable() -> None:
                 backend.enabled = False
 
             _on_main_thread(disable)
 
-        if not backend.uninstall():
+        try:
+            removed = bool(_on_main_thread(backend.uninstall))
+        except Exception:
+            restore_enabled()
+            raise
+
+        if not removed:
+            restore_enabled()
             raise RuntimeError(f"Could not remove existing native install of {entry.name}")
+
         entry.native_installed = False
         return True
 
