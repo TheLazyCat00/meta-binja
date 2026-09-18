@@ -78,6 +78,20 @@ class NativeProviderDiscoveryTests(unittest.TestCase):
         self.assertEqual(entries[0].repo_url, "https://github.com/example/monorepo")
         self.assertEqual(entries[0].install_subdir, "integrations/binja")
         self.assertTrue(entries[0].native_installed)
+        self.assertTrue(entries[0].git_installable)
+
+    def test_compiled_extension_stays_on_native_fallback(self):
+        """A repository URL alone is not enough to clone-and-run a non-Python extension."""
+        extension = FakeExtension(
+            "Compiled Plugin",
+            project_url="https://github.com/example/compiled",
+            apis=["cpp"],
+        )
+        install_binaryninja([FakeRepository("community", [extension])])
+
+        entry = meta_core.NativeProvider().entries()[0]
+
+        self.assertFalse(entry.git_installable)
 
 
 class NativeProviderHandoffTests(unittest.TestCase):
