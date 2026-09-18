@@ -45,6 +45,8 @@ class PluginEntry:
     update_available: bool = False
     source_name: str = ""
     local_path: Optional[str] = None
+    install_subdir: Optional[str] = None
+    native_installed: bool = False
     backend: Any = field(default=None, repr=False, compare=False)
 
     @property
@@ -214,6 +216,8 @@ class NativeProvider:
                         enabled=ext.enabled,
                         update_available=ext.update_available,
                         source_name=repo.path,
+                        install_subdir=getattr(ext, "subdir", "") or None,
+                        native_installed=bool(ext.installed),
                         backend=ext,
                     )
                 )
@@ -618,7 +622,9 @@ class PluginRegistry:
         catalog.enabled = git_entry.enabled
         catalog.update_available = git_entry.update_available
         catalog.version = git_entry.version or catalog.version
-        catalog.backend = git_entry.backend
+        catalog.local_path = git_entry.local_path
+        if catalog.backend is None:
+            catalog.backend = git_entry.backend
         return catalog
 
     def refresh(self, check_native_updates=False, force=False) -> List[PluginEntry]:
@@ -637,17 +643,36 @@ class PluginRegistry:
 
         native_entries = self.native.entries()
         git_entries = self.git.entries(check_updates=check_native_updates or force)
-        combined = list(native_entries)
-        by_repo = {canonical_repo_url(e.repo_url): e for e in native_entries if e.repo_url}
+        git_by_repo = {
+            canonical_repo_url(entry.repo_url): entry
+            for entry in git_entries
+            if entry.repo_url
+        }
+        combined = []
+        by_repo = {}
 
-        # Native Extension Manager entries always win. Otherwise preserve direct
-        # Git installations so they remain visible after refresh/restart.
-        for entry in git_entries:
-            canonical = canonical_repo_url(entry.repo_url) if entry.repo_url else None
-            if canonical and canonical in by_repo:
-                continue
+        # Native entries are discovery metadata. Whenever the catalog exposes a
+        # clonable project URL, GitProvider becomes the sole lifecycle backend.
+        # This deliberately ignores Binary Ninja's native installed/enabled
+        # state so a stale native install can be migrated to the Git lifecycle.
+        for entry in native_entries:
+            canonical = canonical_repo_url(entry.repo_url) if entry.repo_url and is_repo_url(entry.repo_url) else None
             if canonical:
+                git_entry = git_by_repo.pop(canonical, None)
+                if git_entry is not None:
+                    self._copy_git_state(entry, git_entry)
+                else:
+                    entry.installed = False
+                    entry.enabled = False
+                    entry.update_available = False
+                    entry.local_path = None
                 by_repo[canonical] = entry
+            combined.append(entry)
+
+        # Keep direct Git installations that do not also appear in Binary
+        # Ninja's native/community catalog.
+        for canonical, entry in git_by_repo.items():
+            by_repo[canonical] = entry
             combined.append(entry)
 
         for source in catalog_sources():
@@ -705,22 +730,33 @@ class PluginRegistry:
             "updates": sum(1 for e in entries if e.installed and e.update_available),
         }
 
+    @staticmethod
+    def _uses_git_lifecycle(entry: PluginEntry) -> bool:
+        """Return whether an entry can be managed directly from its source repository."""
+        return bool(entry.repo_url and is_repo_url(entry.repo_url))
+
     def install(self, entry):
-        """Install an entry through its native or Git lifecycle backend."""
-        if entry.source is PluginSource.NATIVE:
-            return self.native.install(entry)
-        if entry.source is PluginSource.CATALOG and entry.repo_url:
-            entry = self.git.entry_from_url(entry.repo_url)
-        return self.git.install(entry)
+        """Install through Git when a source repository exists, otherwise fall back to native."""
+        if self._uses_git_lifecycle(entry):
+            if entry.source is PluginSource.NATIVE:
+                self.native.prepare_git_handoff(entry)
+            return self.git.install(entry)
+        return self.native.install(entry)
 
     def uninstall(self, entry):
-        """Uninstall an entry through its native or Git lifecycle backend."""
-        return self.native.uninstall(entry) if entry.source is PluginSource.NATIVE else self.git.uninstall(entry)
+        """Uninstall through the lifecycle backend that owns the installed files."""
+        if self._uses_git_lifecycle(entry):
+            return self.git.uninstall(entry)
+        return self.native.uninstall(entry)
 
     def set_enabled(self, entry, enabled):
-        """Enable or disable an entry through its lifecycle backend."""
-        return self.native.set_enabled(entry, enabled) if entry.source is PluginSource.NATIVE else self.git.set_enabled(entry, enabled)
+        """Enable or disable through Git for source-backed entries, native otherwise."""
+        if self._uses_git_lifecycle(entry):
+            return self.git.set_enabled(entry, enabled)
+        return self.native.set_enabled(entry, enabled)
 
     def update(self, entry):
-        """Update an entry through its native or Git lifecycle backend."""
-        return self.native.update(entry) if entry.source is PluginSource.NATIVE else self.git.update(entry)
+        """Update source-backed entries with Git and package-only entries natively."""
+        if self._uses_git_lifecycle(entry):
+            return self.git.update(entry)
+        return self.native.update(entry)
