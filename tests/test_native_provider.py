@@ -5,9 +5,9 @@ import unittest
 from unittest.mock import patch
 
 try:
-    from tests.stubs import FakeExtension, install_binaryninja
+    from tests.stubs import FakeExtension, FakeRepository, install_binaryninja
 except ImportError:  # pragma: no cover - direct test invocation
-    from stubs import FakeExtension, install_binaryninja
+    from stubs import FakeExtension, FakeRepository, install_binaryninja
 
 install_binaryninja()
 
@@ -74,6 +74,34 @@ class NativeProviderInstallTests(unittest.TestCase):
         entry = types.SimpleNamespace(backend=Extension())
         self.assertTrue(meta_core.NativeProvider().install(entry))
         self.assertTrue(entry.backend.enabled)
+
+    def test_install_reresolves_extension_before_enable(self):
+        """Enable the repository manager's post-install Extension wrapper, not a stale one."""
+        calls = []
+        fresh = FakeExtension("Calltree", path="elbiazo_calltree", installed=True)
+
+        class InstallingExtension(FakeExtension):
+            def install(self, _version_id=None):
+                calls.append("install")
+                self.installed = True
+                repository.plugins[:] = [fresh]
+                return True
+
+            def enable(self):
+                calls.append("stale-enable")
+                return False
+
+        stale = InstallingExtension("Calltree", path="elbiazo_calltree")
+        repository = FakeRepository("community", [stale])
+        install_binaryninja([repository])
+        try:
+            entry = types.SimpleNamespace(backend=stale, source_name="community")
+            self.assertTrue(meta_core.NativeProvider().install(entry))
+            self.assertIs(entry.backend, fresh)
+            self.assertTrue(fresh.enabled)
+            self.assertEqual(calls, ["install"])
+        finally:
+            install_binaryninja()
 
 
 class NativeProviderThreadingTests(unittest.TestCase):
