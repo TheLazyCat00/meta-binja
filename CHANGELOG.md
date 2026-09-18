@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed restart-based native extension activation: Meta Binja now re-resolves the Extension after install, honors Binary Ninja's persisted enabled state even when live loading fails, and reports enabled-but-not-running plugins as `Not loaded` instead of `Enabled`.
 - Fixed native Extension Manager plugins failing to load after installation by dispatching enable/disable operations to Binary Ninja's registered main thread while keeping installation work asynchronous.
 - Fixed Binary Ninja settings registration so `metaBinja.catalogSources` uses the valid `metaBinja` group.
 - Fixed README rendering for angle-bracket placeholders such as `<preset>` without breaking supported HTML.
