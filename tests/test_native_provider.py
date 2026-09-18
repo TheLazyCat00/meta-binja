@@ -5,9 +5,9 @@ import unittest
 from unittest.mock import patch
 
 try:
-    from tests.stubs import FakeExtension, install_binaryninja
+    from tests.stubs import FakeExtension, FakeRepository, install_binaryninja
 except ImportError:  # pragma: no cover - direct test invocation
-    from stubs import FakeExtension, install_binaryninja
+    from stubs import FakeExtension, FakeRepository, install_binaryninja
 
 install_binaryninja()
 
@@ -56,6 +56,28 @@ class NativeProviderInstallTests(unittest.TestCase):
 
         entry = types.SimpleNamespace(backend=Extension())
         self.assertFalse(meta_core.NativeProvider.install(entry))
+
+
+class NativeProviderDiscoveryTests(unittest.TestCase):
+    """Validate metadata exported from Binary Ninja's extension catalog."""
+
+    def test_entries_preserve_project_url_subdir_and_native_state(self):
+        """Discovery retains everything GitProvider needs without owning lifecycle state."""
+        extension = FakeExtension(
+            "Monorepo Plugin",
+            project_url="https://github.com/example/monorepo",
+            installed=True,
+            enabled=True,
+            subdir="integrations/binja",
+        )
+        install_binaryninja([FakeRepository("community", [extension])])
+
+        entries = meta_core.NativeProvider().entries()
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].repo_url, "https://github.com/example/monorepo")
+        self.assertEqual(entries[0].install_subdir, "integrations/binja")
+        self.assertTrue(entries[0].native_installed)
 
 
 class NativeProviderHandoffTests(unittest.TestCase):
