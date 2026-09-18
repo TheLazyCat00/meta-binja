@@ -755,8 +755,21 @@ class PluginRegistry:
                 # native install. If activation fails, the native copy remains
                 # untouched. If native cleanup then fails, remove the Git
                 # activation so the restored native copy remains authoritative.
-                if not self.git.set_enabled(entry, True, install_requirements=False):
+                try:
+                    activated = self.git.set_enabled(entry, True, install_requirements=False)
+                except Exception:
+                    try:
+                        self.git.set_enabled(entry, False, install_requirements=False)
+                    except Exception as rollback_exc:
+                        log_warn(f"Meta Binja: partial Git activation rollback failed: {rollback_exc}")
+                    raise
+                if not activated:
+                    try:
+                        self.git.set_enabled(entry, False, install_requirements=False)
+                    except Exception as rollback_exc:
+                        log_warn(f"Meta Binja: partial Git activation rollback failed: {rollback_exc}")
                     return False
+
                 try:
                     self.native.prepare_git_handoff(entry)
                 except Exception:
