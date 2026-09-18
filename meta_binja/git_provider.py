@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Optional
 from urllib.parse import urlparse
 
@@ -49,6 +49,19 @@ def _validated_activation_name(name: str) -> str:
     if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
         raise ValueError(f"Unsafe plugin activation name: {name!r}")
     return name
+
+
+def _validated_subdir(value: Optional[str]) -> Optional[str]:
+    """Normalize a repository-relative plugin subdirectory without allowing traversal."""
+    if not value:
+        return None
+    if "\x00" in value:
+        raise ValueError(f"Unsafe plugin subdirectory: {value!r}")
+    path = PurePosixPath(value.replace("\\", "/"))
+    if path.is_absolute() or any(part == ".." or ":" in part for part in path.parts):
+        raise ValueError(f"Unsafe plugin subdirectory: {value!r}")
+    parts = [part for part in path.parts if part not in {"", "."}]
+    return "/".join(parts) or None
 
 
 class GitProvider:
@@ -126,6 +139,9 @@ class GitProvider:
                 candidate = value.get(field)
                 if isinstance(candidate, str) and candidate:
                     record[field] = candidate
+            subdir = value.get("install_subdir")
+            if isinstance(subdir, str) and subdir:
+                record["install_subdir"] = _validated_subdir(subdir)
             out[key] = record
         return out
 
@@ -139,8 +155,9 @@ class GitProvider:
         repo: Path,
         activation_name: Optional[str] = None,
         legacy_activation_name: Optional[str] = None,
+        install_subdir: Optional[str] = None,
     ) -> None:
-        """Persist source URL plus public or legacy activation ownership evidence."""
+        """Persist source URL, activation ownership, and an optional plugin subdirectory."""
         metadata = self._read_metadata()
         record = dict(metadata.get(repo.name, {}))
         record["url"] = url
@@ -148,6 +165,11 @@ class GitProvider:
             record["activation_name"] = _validated_activation_name(activation_name)
         if legacy_activation_name:
             record["legacy_activation_name"] = _validated_activation_name(legacy_activation_name)
+        normalized_subdir = _validated_subdir(install_subdir)
+        if normalized_subdir:
+            record["install_subdir"] = normalized_subdir
+        elif install_subdir == "":
+            record.pop("install_subdir", None)
         metadata[repo.name] = record
         self._write_metadata(metadata)
 
@@ -157,6 +179,25 @@ class GitProvider:
         if repo.name in metadata:
             metadata.pop(repo.name, None)
             self._write_metadata(metadata)
+
+
+    def _entry_subdir(self, entry, repo: Path) -> Optional[str]:
+        """Return the normalized plugin subdirectory from the entry or persisted metadata."""
+        if hasattr(entry, "install_subdir"):
+            return _validated_subdir(getattr(entry, "install_subdir"))
+        return _validated_subdir(self._metadata_record(repo).get("install_subdir"))
+
+    def _activation_source(self, repo: Path, install_subdir: Optional[str] = None) -> Path:
+        """Return the checkout directory Binary Ninja should expose as the plugin package."""
+        normalized = _validated_subdir(install_subdir)
+        source = repo if normalized is None else repo.joinpath(*normalized.split("/"))
+        try:
+            source.resolve().relative_to(repo.resolve())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Plugin subdirectory escapes its checkout: {normalized!r}") from exc
+        if not source.is_dir():
+            raise RuntimeError(f"Plugin subdirectory does not exist: {normalized or '.'}")
+        return source
 
     @staticmethod
     def _marker_path(active: Path) -> Path:
@@ -171,11 +212,12 @@ class GitProvider:
         )
 
     def _activation_owned_by(self, active: Path, repo: Path) -> bool:
-        """Return whether an activation path is known to expose *repo*."""
+        """Return whether an activation path is known to expose this managed checkout."""
         if active.is_symlink():
             try:
-                return active.resolve() == repo.resolve()
-            except OSError:
+                expected = self._activation_source(repo, self._metadata_record(repo).get("install_subdir"))
+                return active.resolve() == expected.resolve()
+            except (OSError, RuntimeError, ValueError):
                 return False
         if not active.is_dir():
             return False
@@ -238,18 +280,99 @@ class GitProvider:
             return
         self._remove_path(active)
 
-    def _copy_activation_transactionally(self, repo: Path, active: Path) -> None:
+    def _write_subdir_wrapper(self, target: Path, repo: Path, install_subdir: str, activation_name: str) -> None:
+        """Create a package shim that mirrors Binary Ninja's nested-module loading."""
+        target.mkdir(parents=True, exist_ok=False)
+        self._write_copy_marker(target, repo)
+
+        repo_path = repo.resolve()
+        package_path = repo_path / activation_name
+        search_paths = [str(repo_path)]
+        package_init = None
+        subdir_parts = _validated_subdir(install_subdir).split("/")
+
+        if package_path.is_dir():
+            search_paths.insert(0, str(package_path))
+            candidate_init = package_path / "__init__.py"
+            if candidate_init.is_file():
+                package_init = str(candidate_init)
+            if subdir_parts and subdir_parts[0] == activation_name:
+                subdir_parts = subdir_parts[1:]
+
+        wrapper_lines = [
+            "# Generated by Meta Binja. Changes will be replaced.",
+            "import importlib as _importlib",
+            "import sys as _sys",
+            f"_SEARCH_PATHS = {search_paths!r}",
+            "for _path in reversed(_SEARCH_PATHS):",
+            "    if _path not in _sys.path:",
+            "        _sys.path.insert(0, _path)",
+            "__path__ = list(_SEARCH_PATHS)",
+        ]
+        if package_init:
+            wrapper_lines.extend([
+                f"_PACKAGE_INIT = {package_init!r}",
+                "_WRAPPER_FILE = globals().get('__file__')",
+                "__file__ = _PACKAGE_INIT",
+                "try:",
+                "    with open(_PACKAGE_INIT, 'rb') as _file:",
+                "        exec(compile(_file.read(), _PACKAGE_INIT, 'exec'), globals(), globals())",
+                "finally:",
+                "    __file__ = _WRAPPER_FILE",
+            ])
+        if subdir_parts:
+            dotted_subdir = ".".join(subdir_parts)
+            wrapper_lines.append(f"_importlib.import_module('.{dotted_subdir}', __name__)")
+        wrapper_lines.append("")
+
+        (target / "__init__.py").write_text("\n".join(wrapper_lines), encoding="utf-8")
+
+    def _subdir_activation_transactionally(
+        self,
+        repo: Path,
+        active: Path,
+        install_subdir: str,
+    ) -> None:
+        """Build and atomically swap a wrapper for a nested catalog plugin."""
+        token = uuid.uuid4().hex
+        staged = active.parent / f".{active.name}.meta-binja-stage-{token}"
+        backup = active.parent / f".{active.name}.meta-binja-backup-{token}"
+        try:
+            self._write_subdir_wrapper(staged, repo, install_subdir, active.name)
+            if active.exists() or active.is_symlink():
+                if not self._activation_owned_by(active, repo):
+                    raise RuntimeError(f"Refusing to replace unmanaged activation: {active}")
+                active.rename(backup)
+                try:
+                    staged.rename(active)
+                except Exception:
+                    backup.rename(active)
+                    raise
+                self._remove_path(backup)
+            else:
+                staged.rename(active)
+        finally:
+            if staged.exists() or staged.is_symlink():
+                self._remove_path(staged)
+            if backup.exists() or backup.is_symlink():
+                if not (active.exists() or active.is_symlink()):
+                    backup.rename(active)
+                else:
+                    self._remove_path(backup)
+
+    def _copy_activation_transactionally(self, repo: Path, active: Path, source: Optional[Path] = None) -> None:
         """Build a marked copy off-path, then swap it into the stable activation path.
 
         Rebuilding an existing copied activation uses a sibling backup because
         replacing a non-empty directory is not portable. If the final rename
         fails, the previous activation is restored before the exception escapes.
         """
+        source = source or self._activation_source(repo, self._metadata_record(repo).get("install_subdir"))
         token = uuid.uuid4().hex
         staged = active.parent / f".{active.name}.meta-binja-stage-{token}"
         backup = active.parent / f".{active.name}.meta-binja-backup-{token}"
         try:
-            shutil.copytree(repo, staged, ignore=shutil.ignore_patterns(".git"))
+            shutil.copytree(source, staged, ignore=shutil.ignore_patterns(".git"))
             self._write_copy_marker(staged, repo)
             if active.exists() or active.is_symlink():
                 if not self._activation_owned_by(active, repo):
@@ -272,11 +395,24 @@ class GitProvider:
                 else:
                     self._remove_path(backup)
 
-    def _entry_from_checkout(self, url: str, repo: Path, check_updates: bool = True) -> PluginEntry:
+    def _entry_from_checkout(
+        self,
+        url: str,
+        repo: Path,
+        check_updates: bool = True,
+        install_subdir: Optional[str] = None,
+    ) -> PluginEntry:
         """Build a Git entry for a known local checkout."""
         installed = self._is_usable_worktree(repo)
+        normalized_subdir = _validated_subdir(install_subdir or self._metadata_record(repo).get("install_subdir"))
         active = self._migrate_legacy_activation(url, repo) if installed else self.active_path(url, repo)
         version = self._git(repo, "rev-parse", "--short", "HEAD", check=False).strip() if installed else None
+        local = None
+        if installed:
+            try:
+                local = str(self._activation_source(repo, normalized_subdir))
+            except RuntimeError:
+                local = str(repo)
         return PluginEntry(
             id=f"git:{canonical_repo_url(url)}",
             name=repo_name_from_url(url),
@@ -287,13 +423,19 @@ class GitProvider:
             enabled=installed and self._activation_owned_by(active, repo),
             update_available=self._update_available(repo) if installed and check_updates else False,
             source_name="Git repository",
-            local_path=str(repo) if installed else None,
+            local_path=local,
+            install_subdir=normalized_subdir,
             backend=self,
         )
 
-    def entry_from_url(self, url: str, check_updates: bool = True) -> PluginEntry:
+    def entry_from_url(
+        self,
+        url: str,
+        check_updates: bool = True,
+        install_subdir: Optional[str] = None,
+    ) -> PluginEntry:
         """Build a Git entry for a URL, including its current local state."""
-        return self._entry_from_checkout(url, self.repo_path(url), check_updates)
+        return self._entry_from_checkout(url, self.repo_path(url), check_updates, install_subdir)
 
     def entries(self, check_updates: bool = True):
         """Enumerate previously installed Git plugins after refresh or restart."""
@@ -318,31 +460,43 @@ class GitProvider:
                 repo,
                 record.get("activation_name"),
                 record.get("legacy_activation_name"),
+                record.get("install_subdir"),
             )
-            out.append(self._entry_from_checkout(url, repo, check_updates))
+            out.append(self._entry_from_checkout(url, repo, check_updates, record.get("install_subdir")))
         return out
 
-    def _install_requirements(self, repo: Path) -> bool:
-        """Install requirements through Binary Ninja's configured Python provider."""
-        requirements = repo / "requirements.txt"
-        if not requirements.is_file():
-            return True
-        payload = requirements.read_bytes()
-        try:
-            from binaryninja import PythonScriptingProvider
+    def _install_requirements(self, repo: Path, source: Optional[Path] = None) -> bool:
+        """Install root and plugin-subdirectory requirements through Binary Ninja."""
+        source = source or repo
+        requirement_files = [repo / "requirements.txt"]
+        if source != repo:
+            requirement_files.append(source / "requirements.txt")
 
-            provider = PythonScriptingProvider()
-            installer = getattr(provider, "_install_modules", None)
-            if installer is None:
-                raise RuntimeError("Binary Ninja's Python dependency installer is unavailable")
-            ok = bool(installer(None, payload))
-        except Exception as exc:
-            raise RuntimeError(f"Could not install Python dependencies from {requirements.name}: {exc}") from exc
-        if not ok:
-            raise RuntimeError(
-                f"Could not install Python dependencies from {requirements.name}; "
-                "see Binary Ninja's dependency log"
-            )
+        seen = set()
+        for requirements in requirement_files:
+            try:
+                key = requirements.resolve()
+            except OSError:
+                key = requirements
+            if key in seen or not requirements.is_file():
+                continue
+            seen.add(key)
+            payload = requirements.read_bytes()
+            try:
+                from binaryninja import PythonScriptingProvider
+
+                provider = PythonScriptingProvider()
+                installer = getattr(provider, "_install_modules", None)
+                if installer is None:
+                    raise RuntimeError("Binary Ninja's Python dependency installer is unavailable")
+                ok = bool(installer(None, payload))
+            except Exception as exc:
+                raise RuntimeError(f"Could not install Python dependencies from {requirements}: {exc}") from exc
+            if not ok:
+                raise RuntimeError(
+                    f"Could not install Python dependencies from {requirements}; "
+                    "see Binary Ninja's dependency log"
+                )
         return True
 
     def _clone(self, url: str, repo: Path) -> bool:
@@ -354,8 +508,17 @@ class GitProvider:
         )
         return result.returncode == 0 and self._is_usable_worktree(repo)
 
-    def install(self, entry) -> bool:
-        """Ensure a valid checkout exists, then activate an arbitrary Git plugin."""
+    def prepare_install(self, entry) -> bool:
+        """Clone, validate, and install dependencies without exposing the plugin yet.
+
+        Native-to-Git migration uses this phase before removing the old native
+        package, so clone, subdirectory, dependency, and activation-name
+        failures cannot leave the user with neither installation.
+
+        Existing activation ownership is checked against currently persisted
+        metadata. A catalog changing install_subdir must not make an otherwise
+        owned activation look foreign before it can be rebuilt.
+        """
         if not entry.repo_url or not is_repo_url(entry.repo_url):
             return False
         repo = self.repo_path(entry.repo_url)
@@ -368,8 +531,28 @@ class GitProvider:
         elif not self._clone(entry.repo_url, repo):
             self._remove_path(repo)
             return False
+
+        install_subdir = _validated_subdir(getattr(entry, "install_subdir", None))
+        source = self._activation_source(repo, install_subdir)
+
+        # Persist the source URL, but leave previous subdir metadata untouched
+        # until activation has been rebuilt successfully for the new layout.
         self._remember(entry.repo_url, repo)
-        return self.set_enabled(entry, True)
+
+        active = self.active_path(entry.repo_url, repo)
+        if (active.exists() or active.is_symlink()) and not self._activation_owned_by(active, repo):
+            raise RuntimeError(
+                f"Cannot enable {repo_name_from_url(entry.repo_url)}: {active} already exists "
+                "and is not managed by Meta Binja"
+            )
+        self._install_requirements(repo, source)
+        return True
+
+    def install(self, entry) -> bool:
+        """Prepare and activate an arbitrary Git plugin."""
+        if not self.prepare_install(entry):
+            return False
+        return self.set_enabled(entry, True, install_requirements=False)
 
     def uninstall(self, entry) -> bool:
         """Deactivate and remove a managed Git plugin checkout."""
@@ -380,15 +563,21 @@ class GitProvider:
         self._forget(repo)
         return True
 
-    def set_enabled(self, entry, enabled: bool) -> bool:
+    def set_enabled(self, entry, enabled: bool, install_requirements: bool = True) -> bool:
         """Expose or hide a managed checkout in Binary Ninja's plugin directory."""
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
+        previous_subdir = _validated_subdir(self._metadata_record(repo).get("install_subdir"))
+        install_subdir = self._entry_subdir(entry, repo)
+
+        # Resolve and verify the existing activation before changing subdir
+        # metadata, otherwise a legitimate old activation can appear foreign.
         active = self._migrate_legacy_activation(entry.repo_url, repo)
         legacy = self._legacy_active_path(repo)
         if enabled:
             if not self._is_usable_worktree(repo):
                 raise RuntimeError(f"Cannot enable {repo_name_from_url(entry.repo_url)}: checkout is not a usable Git worktree")
+            source = self._activation_source(repo, install_subdir)
             if active.exists() or active.is_symlink():
                 if not self._activation_owned_by(active, repo):
                     raise RuntimeError(
@@ -396,19 +585,44 @@ class GitProvider:
                         "and is not managed by Meta Binja"
                     )
                 try:
-                    self._install_requirements(repo)
+                    if install_requirements:
+                        self._install_requirements(repo, source)
                 except Exception:
                     self._remove_managed_activation(active, repo)
                     raise
-                self._remember(entry.repo_url, repo, active.name)
+
+                if install_subdir != previous_subdir:
+                    if install_subdir:
+                        self._subdir_activation_transactionally(repo, active, install_subdir)
+                    else:
+                        # Moving from a nested wrapper back to the repository
+                        # root uses the transactional copy path so a failed
+                        # swap cannot destroy the old activation.
+                        self._copy_activation_transactionally(repo, active, source)
+
+                self._remember(
+                    entry.repo_url,
+                    repo,
+                    active.name,
+                    install_subdir=install_subdir or "",
+                )
                 return True
 
-            self._install_requirements(repo)
-            try:
-                os.symlink(repo, active, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                self._copy_activation_transactionally(repo, active)
-            self._remember(entry.repo_url, repo, active.name)
+            if install_requirements:
+                self._install_requirements(repo, source)
+            if install_subdir:
+                self._subdir_activation_transactionally(repo, active, install_subdir)
+            else:
+                try:
+                    os.symlink(source, active, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    self._copy_activation_transactionally(repo, active, source)
+            self._remember(
+                entry.repo_url,
+                repo,
+                active.name,
+                install_subdir=install_subdir or "",
+            )
             return True
 
         self._remove_managed_activation(active, repo)
@@ -428,14 +642,27 @@ class GitProvider:
         )
         if result.returncode != 0:
             return False
+        install_subdir = self._entry_subdir(entry, repo)
+        source = self._activation_source(repo, install_subdir)
         active = self._migrate_legacy_activation(entry.repo_url, repo)
         try:
-            self._install_requirements(repo)
+            self._install_requirements(repo, source)
         except Exception:
             self._remove_managed_activation(active, repo)
             raise
-        if active.exists() and not active.is_symlink() and self._activation_owned_by(active, repo):
-            self._copy_activation_transactionally(repo, active)
+        if active.exists() and self._activation_owned_by(active, repo):
+            if install_subdir:
+                self._subdir_activation_transactionally(repo, active, install_subdir)
+            elif not active.is_symlink():
+                self._copy_activation_transactionally(repo, active, source)
+            self._remember(
+                entry.repo_url,
+                repo,
+                active.name,
+                install_subdir=install_subdir or "",
+            )
+        elif not (active.exists() or active.is_symlink()):
+            self._remember(entry.repo_url, repo, install_subdir=install_subdir or "")
         return True
 
     @staticmethod

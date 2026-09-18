@@ -1,5 +1,9 @@
 # Native Extension Manager integration
 
-Meta Binja does not replace Binary Ninja's extension lifecycle internally. `NativeProvider` wraps `RepositoryManager` and `Extension` so official/community plugins continue to use Binary Ninja for installation, dependency handling, update checks, enable/disable state, and uninstall behavior.
+Binary Ninja's Extension Manager is now primarily a **discovery source** for Meta Binja.
 
-This isolation is intentional: if the upstream Extension Manager API changes, the adapter can be updated without rewriting the UI or catalog/Git backends.
+For each native/community catalog entry, Meta Binja reads the extension name, description, author, published version, `project_url`, and optional `subdir`. When `project_url` is a clonable repository URL and the extension declares the `python3` API, all install/update/enable/disable/uninstall operations are delegated to `GitProvider`, exactly like a repository URL pasted into search.
+
+If an older Meta Binja version already installed that entry through Binary Ninja's native manager, the first Git install performs a one-time handoff: the native copy is disabled and uninstalled before the Git checkout is activated. This prevents duplicate plugin packages after restart.
+
+Non-Python, compiled/prebuilt, and package-only extensions retain Binary Ninja's native lifecycle as a fallback.

@@ -2,22 +2,24 @@
 
 Meta Binja presents a single plugin-management UI while keeping lifecycle behavior behind providers.
 
-## Native extensions
+## Native/community discovery
 
-`NativeProvider` wraps Binary Ninja's public `RepositoryManager` / `Extension` API. Official and community extensions remain owned by Binary Ninja, so install/uninstall, dependency handling, enable/disable, and update semantics stay consistent with the native manager.
+`NativeProvider` uses Binary Ninja's public `RepositoryManager` / `Extension` API as a discovery source. For Python entries with a clonable `project_url`, Meta Binja keeps the native catalog's name, description, version, repository URL, and `subdir`, but lifecycle state comes from `GitProvider`. Existing native-manager installs are disabled/uninstalled once during the handoff so the native package cannot conflict with the Git-managed checkout.
 
-## Arbitrary Git repositories
+Non-Python, compiled/prebuilt, or package-only extensions retain Binary Ninja's native lifecycle even when their metadata links to a source repository.
 
-`GitProvider` manages repositories that are not represented by native extensions. Repository storage and plugin activation intentionally use different identities:
+## Git lifecycle
+
+`GitProvider` manages both direct repository installs and source-backed native/community catalog entries. Repository storage and plugin activation intentionally use different identities:
 
 - Checkouts live under `meta-binja/repos` beneath Binary Ninja's user directory with a collision-safe `<canonical-repo>-<hash>` name.
 - Enabled plugins are exposed from the normal user `plugins` directory with the repository's case-preserving basename, for example `plugins/RouteNinja`. This matters because the directory is also a Python package name and plugins may use absolute self-imports.
-- `managed.json` records both the source URL and the public activation name. Legacy hash-suffixed activations are migrated automatically when they can be moved safely.
+- `managed.json` records the source URL, public activation name, and optional catalog-provided plugin subdirectory. Legacy hash-suffixed activations are migrated automatically when they can be moved safely.
 - If the desired public plugin name already belongs to something Meta Binja does not manage, enable/install fails rather than changing the package name or overwriting the existing plugin.
 
-Directory symlinks are preferred. If symlink creation is unavailable, Meta Binja copies the checkout and writes a private ownership marker into the copy so later disable/update/uninstall operations only mutate paths it can prove it owns.
+Directory symlinks are preferred for repository-root plugins. If a catalog declares a plugin `subdir`, Meta Binja creates a small managed wrapper package that adds the checkout to Python's search path and imports the declared nested module, matching Binary Ninja's native loader semantics. If root-plugin symlink creation is unavailable, Meta Binja uses an ownership-marked transactional copy so later disable/update/uninstall operations only mutate paths it can prove it owns.
 
-Git plugins with a `requirements.txt` are installed through Binary Ninja's own Python dependency installer before activation and again after updates. This keeps interpreter, virtual-environment, proxy, and per-version site-package behavior aligned with Binary Ninja. If dependency installation fails, the checkout is kept for diagnosis/retry but is not left enabled.
+Git plugins with a `requirements.txt` at the repository root and/or active plugin subdirectory are installed through Binary Ninja's own Python dependency installer before activation and again after updates. This keeps interpreter, virtual-environment, proxy, and per-version site-package behavior aligned with Binary Ninja. If dependency installation fails, the checkout is kept for diagnosis/retry but is not left enabled.
 
 Meta Binja deliberately does not execute arbitrary setup scripts or post-install hooks. Installing a Binary Ninja plugin still means trusting code that Binary Ninja may import and execute.
 
@@ -29,7 +31,7 @@ Meta Binja deliberately does not execute arbitrary setup scripts or post-install
 - JSON arrays of repository URLs.
 - JSON objects with a `plugins` or `entries` array.
 
-Entries are normalized to the same `PluginEntry` model. Catalog results are deduplicated against native plugins by canonical repository URL, with the native extension taking precedence.
+Entries are normalized to the same `PluginEntry` model. Native/community metadata takes presentation precedence for matching repository URLs, while installed/enabled/update state is overlaid from the single Git lifecycle.
 
 ## Repository metadata
 
@@ -40,13 +42,12 @@ READMEs, and facts. See [docs/metadata.md](docs/metadata.md).
 ## Threading
 
 The UI owns a small thread pool. Refreshes, catalog downloads, README fetches,
-and lifecycle actions start there, and results return to the UI thread through
-signals; a stale result is discarded when the user has moved on. Native
-extension activation and deactivation are the exception: Binary Ninja may load
-or unload plugin code as part of those calls, so `NativeProvider` marshals them
-through `execute_on_main_thread_and_wait` onto Binary Ninja's registered main
-thread. Installation/download work stays on the worker to avoid blocking the
-UI. The panel keeps each task alive until it reports back, because a pool-owned
+Git lifecycle actions, and native fallback installation work start there, and
+results return to the UI thread through signals; a stale result is discarded
+when the user has moved on. Native fallback activation/deactivation and
+one-time migration cleanup are marshalled through
+`execute_on_main_thread_and_wait` when they can load or unload plugin code.
+The panel keeps each task alive until it reports back, because a pool-owned
 runnable is destroyed with its signal sender. A refresh rebuilds the shared
 registry, so one is dropped while another refresh or a lifecycle action is in
 flight. Cache updates are a read-modify-write, so they are serialized per cache

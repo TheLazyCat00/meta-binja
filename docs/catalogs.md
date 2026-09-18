@@ -10,4 +10,4 @@ Supported MVP inputs:
 
 Catalogs are cached on disk for six hours; Refresh re-reads them immediately. Set `GITHUB_TOKEN` in your environment to raise GitHub's API rate limit.
 
-Catalog entries do not override Binary Ninja-managed extensions. If the same repository appears in a native Extension Manager repository, the native entry wins and all lifecycle operations remain delegated to Binary Ninja.
+If the same repository appears in Binary Ninja's native/community catalog, that entry supplies the presentation metadata. Lifecycle state still comes from Meta Binja's Git checkout, so native/community and direct-repository installs share one implementation.

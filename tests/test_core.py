@@ -22,6 +22,7 @@ from meta_binja.core import (
     CatalogProvider,
     GitProvider,
     PluginEntry,
+    PluginRegistry,
     PluginSource,
     canonical_repo_url,
     is_repo_url,
@@ -159,7 +160,16 @@ class GitProviderTests(unittest.TestCase):
                 json.dumps({checkout.name: "https://github.com/example/sample"}),
                 encoding="utf-8",
             )
-            provider._git = lambda _repo, *args, **_kwargs: "abc123\n" if "rev-parse" in args else ""
+            def fake_git(_repo, *args, **_kwargs):
+                if "--is-inside-work-tree" in args:
+                    return "true\n"
+                if "--is-bare-repository" in args:
+                    return "false\n"
+                if "rev-parse" in args:
+                    return "abc123\n"
+                return ""
+
+            provider._git = fake_git
             provider._update_available = lambda _repo: False
 
             entries = provider.entries()
@@ -186,6 +196,262 @@ def _entry(name, **kwargs):
     defaults = {"id": f"test:{name}", "name": name, "source": PluginSource.CATALOG}
     defaults.update(kwargs)
     return PluginEntry(**defaults)
+
+
+class RegistryLifecycleTests(unittest.TestCase):
+    """Validate that native catalogs feed the unified Git lifecycle."""
+
+    @staticmethod
+    def _registry(native_entries, git_entries):
+        """Build a registry with deterministic in-memory lifecycle providers."""
+        class Native:
+            def __init__(self):
+                self.handoffs = []
+                self.installs = []
+                self.handoff_error = None
+
+            def entries(self):
+                return list(native_entries)
+
+            def prepare_git_handoff(self, entry):
+                self.handoffs.append(entry)
+                if self.handoff_error is not None:
+                    raise self.handoff_error
+                return True
+
+            def install(self, entry):
+                self.installs.append(entry)
+                return True
+
+        class Git:
+            def __init__(self):
+                self.installs = []
+                self.prepared = []
+                self.enabled = []
+                self.prepare_result = True
+                self.enable_error = None
+
+            def entries(self, check_updates=False):
+                return list(git_entries)
+
+            def prepare_install(self, entry):
+                self.prepared.append(entry)
+                return self.prepare_result
+
+            def set_enabled(self, entry, enabled, install_requirements=True):
+                self.enabled.append((entry, enabled, install_requirements))
+                if self.enable_error is not None and enabled:
+                    raise self.enable_error
+                return True
+
+            def install(self, entry):
+                self.installs.append(entry)
+                return True
+
+        registry = PluginRegistry.__new__(PluginRegistry)
+        registry.native = Native()
+        registry.git = Git()
+        registry._entries = {}
+        registry.errors = []
+        return registry
+
+    def test_source_backed_native_state_comes_from_git_not_extension_manager(self):
+        """A stale native install does not masquerade as the managed installation."""
+        native = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            installed=True,
+            enabled=True,
+            native_installed=True,
+        )
+        registry = self._registry([native], [])
+
+        entries = registry.refresh()
+
+        self.assertEqual(len(entries), 1)
+        self.assertIs(entries[0], native)
+        self.assertFalse(native.installed)
+        self.assertFalse(native.enabled)
+        self.assertTrue(native.native_installed)
+
+    def test_native_only_catalog_entry_does_not_hide_matching_direct_git_checkout(self):
+        """Compiled/native-only entries and direct Git installs remain independently manageable."""
+        native = PluginEntry(
+            id="native:community:compiled",
+            name="Compiled",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/example/compiled",
+            installed=True,
+            enabled=True,
+            git_installable=False,
+        )
+        git = PluginEntry(
+            id="git:https://github.com/example/compiled",
+            name="compiled",
+            source=PluginSource.GIT,
+            repo_url="https://github.com/example/compiled",
+            installed=True,
+            enabled=True,
+        )
+        registry = self._registry([native], [git])
+
+        entries = registry.refresh()
+
+        self.assertIn(native, entries)
+        self.assertIn(git, entries)
+        self.assertEqual(len(entries), 2)
+
+    def test_git_state_is_overlaid_on_native_catalog_metadata(self):
+        """Installed source-backed plugins keep native metadata but use Git lifecycle state."""
+        native = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            version="3.0",
+            install_subdir=None,
+        )
+        git = PluginEntry(
+            id="git:https://github.com/elbiazo/calltree",
+            name="calltree",
+            source=PluginSource.GIT,
+            repo_url="https://github.com/elbiazo/calltree",
+            version="abc123",
+            installed=True,
+            enabled=True,
+            local_path="/tmp/calltree",
+        )
+        registry = self._registry([native], [git])
+
+        entries = registry.refresh()
+
+        self.assertEqual(len(entries), 1)
+        self.assertIs(entries[0], native)
+        self.assertEqual(native.source, PluginSource.NATIVE)
+        self.assertTrue(native.installed)
+        self.assertTrue(native.enabled)
+        self.assertEqual(native.version, "abc123")
+        self.assertEqual(native.local_path, "/tmp/calltree")
+
+    def test_calltree_install_handoffs_native_copy_then_uses_git(self):
+        """Calltree and other source-backed native entries never use native install()."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+
+        self.assertTrue(registry.install(entry))
+
+        self.assertEqual(registry.git.prepared, [entry])
+        self.assertEqual(registry.git.enabled, [(entry, True, False)])
+        self.assertEqual(registry.native.handoffs, [entry])
+        self.assertEqual(registry.native.installs, [])
+        self.assertEqual(registry.git.installs, [])
+
+    def test_failed_git_activation_keeps_existing_native_install(self):
+        """Git activation failure happens before native cleanup begins."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.git.enable_error = RuntimeError("activation failed")
+
+        with self.assertRaisesRegex(RuntimeError, "activation failed"):
+            registry.install(entry)
+
+        self.assertEqual(registry.git.prepared, [entry])
+        self.assertEqual(
+            registry.git.enabled,
+            [
+                (entry, True, False),
+                (entry, False, False),
+            ],
+        )
+        self.assertEqual(registry.native.handoffs, [])
+
+    def test_failed_native_cleanup_rolls_back_git_activation(self):
+        """Native cleanup failure removes the newly activated Git copy."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.native.handoff_error = RuntimeError("native cleanup failed")
+
+        with self.assertRaisesRegex(RuntimeError, "native cleanup failed"):
+            registry.install(entry)
+
+        self.assertEqual(registry.native.handoffs, [entry])
+        self.assertEqual(
+            registry.git.enabled,
+            [
+                (entry, True, False),
+                (entry, False, False),
+            ],
+        )
+
+    def test_failed_git_preflight_keeps_existing_native_install(self):
+        """A clone/preflight failure happens before native migration cleanup."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.git.prepare_result = False
+
+        self.assertFalse(registry.install(entry))
+
+        self.assertEqual(registry.git.prepared, [entry])
+        self.assertEqual(registry.native.handoffs, [])
+        self.assertEqual(registry.git.enabled, [])
+
+
+    def test_package_only_native_entry_keeps_native_fallback(self):
+        """Extensions without a clonable project URL retain Binary Ninja's lifecycle."""
+        entry = PluginEntry(
+            id="native:official:package-only",
+            name="Package Only",
+            source=PluginSource.NATIVE,
+        )
+        registry = self._registry([], [])
+
+        self.assertTrue(registry.install(entry))
+
+        self.assertEqual(registry.native.installs, [entry])
+        self.assertEqual(registry.git.installs, [])
+
+
+    def test_compiled_native_entry_with_repo_url_keeps_native_fallback(self):
+        """Compiled/prebuilt extensions are not treated as clone-and-run Python plugins."""
+        entry = PluginEntry(
+            id="native:community:compiled",
+            name="Compiled",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/example/compiled",
+            git_installable=False,
+        )
+        registry = self._registry([], [])
+
+        self.assertTrue(registry.install(entry))
+
+        self.assertEqual(registry.native.installs, [entry])
+        self.assertEqual(registry.git.installs, [])
 
 
 class PresentationTests(unittest.TestCase):
