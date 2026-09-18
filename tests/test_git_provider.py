@@ -1,5 +1,6 @@
 """Regression tests for Git-backed plugin activation semantics."""
 
+import importlib.util
 import json
 import subprocess
 import tempfile
@@ -300,30 +301,48 @@ class GitActivationTests(unittest.TestCase):
                 provider.set_enabled(entry, True)
             self.assertFalse((provider.active_dir / "Plugin").exists())
 
-    def test_native_catalog_subdir_is_the_activation_source(self):
-        """Expose the catalog-declared plugin subdirectory instead of the repository root."""
+    def test_native_catalog_subdir_uses_nested_module_wrapper(self):
+        """Mirror Binary Ninja's native loader by importing the catalog-declared nested module."""
         url = "https://github.com/example/monorepo-plugin"
+        module_name = "monorepo-plugin-test"
         with tempfile.TemporaryDirectory() as temp_dir:
             provider = self._provider(temp_dir)
             repo = self._checkout(provider, url)
             source = repo / "integrations" / "binja"
             source.mkdir(parents=True)
-            (source / "__init__.py").write_text("", encoding="utf-8")
+            (source / "__init__.py").write_text("LOADED = True\n", encoding="utf-8")
             entry = types.SimpleNamespace(repo_url=url, install_subdir="integrations/binja")
 
-            with patch.object(provider, "_install_requirements", return_value=True) as requirements, patch(
-                "meta_binja.git_provider.os.symlink"
-            ) as symlink:
+            with patch.object(provider, "_install_requirements", return_value=True) as requirements:
                 self.assertTrue(provider.install(entry))
 
             active = provider.active_dir / "monorepo-plugin"
-            symlink.assert_called_once_with(source, active, target_is_directory=True)
+            wrapper = active / "__init__.py"
+            self.assertTrue(wrapper.exists())
+            self.assertFalse(active.is_symlink())
             requirements.assert_called_once_with(repo, source)
             metadata = json.loads(provider.metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata[repo.name]["install_subdir"], "integrations/binja")
 
-    def test_subdir_copy_fallback_copies_only_plugin_package(self):
-        """Windows-style copy activation must copy the plugin subdirectory, not the whole monorepo."""
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                wrapper,
+                submodule_search_locations=[str(active)],
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys_modules = __import__("sys").modules
+            sys_modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+                nested = sys_modules[f"{module_name}.integrations.binja"]
+                self.assertTrue(nested.LOADED)
+            finally:
+                for name in list(sys_modules):
+                    if name == module_name or name.startswith(module_name + "."):
+                        sys_modules.pop(name, None)
+
+    def test_subdir_activation_is_a_small_wrapper_not_a_repo_copy(self):
+        """Nested plugins keep source in the private checkout and expose only a wrapper package."""
         url = "https://github.com/example/monorepo-plugin"
         with tempfile.TemporaryDirectory() as temp_dir:
             provider = self._provider(temp_dir)
@@ -335,13 +354,13 @@ class GitActivationTests(unittest.TestCase):
             (source / "plugin.txt").write_text("plugin", encoding="utf-8")
             entry = types.SimpleNamespace(repo_url=url, install_subdir="plugins/binja")
 
-            with patch.object(provider, "_install_requirements", return_value=True), patch(
-                "meta_binja.git_provider.os.symlink", side_effect=OSError("unavailable")
-            ):
+            with patch.object(provider, "_install_requirements", return_value=True):
                 self.assertTrue(provider.install(entry))
 
             active = provider.active_dir / "monorepo-plugin"
-            self.assertTrue((active / "plugin.txt").exists())
+            self.assertTrue((active / "__init__.py").exists())
+            self.assertTrue((active / ".meta-binja-managed.json").exists())
+            self.assertFalse((active / "plugin.txt").exists())
             self.assertFalse((active / "root-only.txt").exists())
             self.assertTrue(provider._activation_owned_by(active, repo))
 
