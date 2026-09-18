@@ -428,8 +428,13 @@ class GitProvider:
         )
         return result.returncode == 0 and self._is_usable_worktree(repo)
 
-    def install(self, entry) -> bool:
-        """Ensure a valid checkout exists, then activate an arbitrary Git plugin."""
+    def prepare_install(self, entry) -> bool:
+        """Clone, validate, and install dependencies without exposing the plugin yet.
+
+        Native-to-Git migration uses this phase before removing the old native
+        package, so clone, subdirectory, dependency, and activation-name
+        failures cannot leave the user with neither installation.
+        """
         if not entry.repo_url or not is_repo_url(entry.repo_url):
             return False
         repo = self.repo_path(entry.repo_url)
@@ -442,10 +447,25 @@ class GitProvider:
         elif not self._clone(entry.repo_url, repo):
             self._remove_path(repo)
             return False
+
         install_subdir = _validated_subdir(getattr(entry, "install_subdir", None))
-        self._activation_source(repo, install_subdir)
+        source = self._activation_source(repo, install_subdir)
         self._remember(entry.repo_url, repo, install_subdir=install_subdir or "")
-        return self.set_enabled(entry, True)
+
+        active = self.active_path(entry.repo_url, repo)
+        if (active.exists() or active.is_symlink()) and not self._activation_owned_by(active, repo):
+            raise RuntimeError(
+                f"Cannot enable {repo_name_from_url(entry.repo_url)}: {active} already exists "
+                "and is not managed by Meta Binja"
+            )
+        self._install_requirements(repo, source)
+        return True
+
+    def install(self, entry) -> bool:
+        """Prepare and activate an arbitrary Git plugin."""
+        if not self.prepare_install(entry):
+            return False
+        return self.set_enabled(entry, True, install_requirements=False)
 
     def uninstall(self, entry) -> bool:
         """Deactivate and remove a managed Git plugin checkout."""
@@ -456,7 +476,7 @@ class GitProvider:
         self._forget(repo)
         return True
 
-    def set_enabled(self, entry, enabled: bool) -> bool:
+    def set_enabled(self, entry, enabled: bool, install_requirements: bool = True) -> bool:
         """Expose or hide a managed checkout in Binary Ninja's plugin directory."""
         assert entry.repo_url
         repo = self.repo_path(entry.repo_url)
@@ -476,14 +496,16 @@ class GitProvider:
                         "and is not managed by Meta Binja"
                     )
                 try:
-                    self._install_requirements(repo, source)
+                    if install_requirements:
+                        self._install_requirements(repo, source)
                 except Exception:
                     self._remove_managed_activation(active, repo)
                     raise
                 self._remember(entry.repo_url, repo, active.name, install_subdir=install_subdir)
                 return True
 
-            self._install_requirements(repo, source)
+            if install_requirements:
+                self._install_requirements(repo, source)
             try:
                 os.symlink(source, active, target_is_directory=True)
             except (OSError, NotImplementedError):
