@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed native Extension Manager plugins failing to load after installation by dispatching enable/disable operations to Binary Ninja's registered main thread while keeping installation work asynchronous.
 - Fixed Binary Ninja settings registration so `metaBinja.catalogSources` uses the valid `metaBinja` group.
 - Fixed README rendering for angle-bracket placeholders such as `<preset>` without breaking supported HTML.
 - Suppressed duplicate Native rows for Git activations that Meta Binja can prove it owns.
