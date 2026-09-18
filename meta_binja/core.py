@@ -666,8 +666,8 @@ class PluginRegistry:
         for entry in native_entries:
             canonical = canonical_repo_url(entry.repo_url) if entry.repo_url and is_repo_url(entry.repo_url) else None
             if canonical:
-                git_entry = git_by_repo.pop(canonical, None)
                 if entry.git_installable:
+                    git_entry = git_by_repo.pop(canonical, None)
                     if git_entry is not None:
                         self._copy_git_state(entry, git_entry)
                     else:
@@ -750,8 +750,22 @@ class PluginRegistry:
             if entry.source is PluginSource.NATIVE:
                 if not self.git.prepare_install(entry):
                     return False
-                self.native.prepare_git_handoff(entry)
-                return self.git.set_enabled(entry, True, install_requirements=False)
+
+                # Activate the prepared Git checkout before removing an existing
+                # native install. If activation fails, the native copy remains
+                # untouched. If native cleanup then fails, remove the Git
+                # activation so the restored native copy remains authoritative.
+                if not self.git.set_enabled(entry, True, install_requirements=False):
+                    return False
+                try:
+                    self.native.prepare_git_handoff(entry)
+                except Exception:
+                    try:
+                        self.git.set_enabled(entry, False, install_requirements=False)
+                    except Exception as rollback_exc:
+                        log_warn(f"Meta Binja: Git activation rollback failed: {rollback_exc}")
+                    raise
+                return True
             return self.git.install(entry)
         return self.native.install(entry)
 
