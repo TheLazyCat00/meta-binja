@@ -43,6 +43,7 @@ class PluginEntry:
     installed: bool = False
     enabled: bool = False
     update_available: bool = False
+    running: Optional[bool] = None
     source_name: str = ""
     local_path: Optional[str] = None
     backend: Any = field(default=None, repr=False, compare=False)
@@ -75,6 +76,8 @@ class PluginEntry:
             return "available"
         if self.update_available:
             return "update"
+        if self.source is PluginSource.NATIVE and self.enabled and self.running is False:
+            return "not_loaded"
         return "enabled" if self.enabled else "disabled"
 
     @property
@@ -84,6 +87,7 @@ class PluginEntry:
             "available": "Available",
             "update": "Update",
             "enabled": "Enabled",
+            "not_loaded": "Not loaded",
             "disabled": "Disabled",
         }[self.status_kind]
 
@@ -201,6 +205,10 @@ class NativeProvider:
                     version = ext.current_version.version
                 except Exception:
                     version = None
+                try:
+                    running = ext.running if ext.installed else None
+                except Exception:
+                    running = None
                 out.append(
                     PluginEntry(
                         id=f"native:{repo.path}:{ext.path}",
@@ -213,6 +221,7 @@ class NativeProvider:
                         installed=ext.installed,
                         enabled=ext.enabled,
                         update_available=ext.update_available,
+                        running=running,
                         source_name=repo.path,
                         backend=ext,
                     )
