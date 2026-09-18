@@ -341,6 +341,52 @@ class GitActivationTests(unittest.TestCase):
                     if name == module_name or name.startswith(module_name + "."):
                         sys_modules.pop(name, None)
 
+    def test_subdir_wrapper_preserves_real_package_initializer(self):
+        """A binsync-style subdir keeps the real top-level package semantics."""
+        url = "https://github.com/example/binsync"
+        module_name = "binsync"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = self._checkout(provider, url)
+            package = repo / "binsync"
+            plugin = package / "stub_files"
+            plugin.mkdir(parents=True)
+            (package / "__init__.py").write_text(
+                "PACKAGE_FILE = __file__\nROOT_VALUE = 42\n",
+                encoding="utf-8",
+            )
+            (plugin / "__init__.py").write_text(
+                "from binsync import ROOT_VALUE\nLOADED_VALUE = ROOT_VALUE\n",
+                encoding="utf-8",
+            )
+            entry = types.SimpleNamespace(repo_url=url, install_subdir="binsync/stub_files")
+
+            with patch.object(provider, "_install_requirements", return_value=True):
+                self.assertTrue(provider.install(entry))
+
+            active = provider.active_dir / "binsync"
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                active / "__init__.py",
+                submodule_search_locations=[str(active)],
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys_modules = __import__("sys").modules
+            previous = sys_modules.pop(module_name, None)
+            sys_modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+                nested = sys_modules["binsync.stub_files"]
+                self.assertEqual(module.ROOT_VALUE, 42)
+                self.assertEqual(nested.LOADED_VALUE, 42)
+                self.assertEqual(Path(module.PACKAGE_FILE), package / "__init__.py")
+            finally:
+                for name in list(sys_modules):
+                    if name == module_name or name.startswith(module_name + "."):
+                        sys_modules.pop(name, None)
+                if previous is not None:
+                    sys_modules[module_name] = previous
+
     def test_subdir_activation_is_a_small_wrapper_not_a_repo_copy(self):
         """Nested plugins keep source in the private checkout and expose only a wrapper package."""
         url = "https://github.com/example/monorepo-plugin"
