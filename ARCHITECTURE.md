@@ -17,7 +17,7 @@ Non-Python, compiled/prebuilt, or package-only extensions retain Binary Ninja's 
 - `managed.json` records the source URL, public activation name, and optional catalog-provided plugin subdirectory. Legacy hash-suffixed activations are migrated automatically when they can be moved safely.
 - If the desired public plugin name already belongs to something Meta Binja does not manage, enable/install fails rather than changing the package name or overwriting the existing plugin.
 
-Directory symlinks are preferred. If a catalog declares a plugin `subdir`, Meta Binja exposes that subdirectory rather than the repository root. If symlink creation is unavailable, Meta Binja copies only the active plugin package and writes a private ownership marker into the copy so later disable/update/uninstall operations only mutate paths it can prove it owns.
+Directory symlinks are preferred for repository-root plugins. If a catalog declares a plugin `subdir`, Meta Binja creates a small managed wrapper package that adds the checkout to Python's search path and imports the declared nested module, matching Binary Ninja's native loader semantics. If root-plugin symlink creation is unavailable, Meta Binja uses an ownership-marked transactional copy so later disable/update/uninstall operations only mutate paths it can prove it owns.
 
 Git plugins with a `requirements.txt` at the repository root and/or active plugin subdirectory are installed through Binary Ninja's own Python dependency installer before activation and again after updates. This keeps interpreter, virtual-environment, proxy, and per-version site-package behavior aligned with Binary Ninja. If dependency installation fails, the checkout is kept for diagnosis/retry but is not left enabled.
 
