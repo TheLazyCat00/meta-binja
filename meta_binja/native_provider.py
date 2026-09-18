@@ -39,7 +39,32 @@ def _on_main_thread(callback: Callable[[], _T]) -> _T:
 
 
 class NativeProvider(_core.NativeProvider):
-    """Binary Ninja native provider with thread-safe lifecycle semantics."""
+    """Use Binary Ninja's manager for discovery, fallback lifecycle, and migration cleanup."""
+
+    @staticmethod
+    def prepare_git_handoff(entry):
+        """Remove an older native-manager install before GitProvider takes ownership.
+
+        Source-backed community plugins are no longer installed through the
+        Extension Manager. Existing native installs from older Meta Binja
+        versions are disabled and uninstalled once so Binary Ninja cannot load
+        both the native package and the Git-managed checkout on restart.
+        """
+        backend = entry.backend
+        installed = bool(getattr(backend, "installed", False) or getattr(entry, "native_installed", False))
+        if not installed:
+            return True
+
+        if bool(getattr(backend, "enabled", False)):
+            def disable() -> None:
+                backend.enabled = False
+
+            _on_main_thread(disable)
+
+        if not backend.uninstall():
+            raise RuntimeError(f"Could not remove existing native install of {entry.name}")
+        entry.native_installed = False
+        return True
 
     @staticmethod
     def install(entry):
