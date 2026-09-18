@@ -87,7 +87,7 @@ Installing a Binary Ninja plugin means trusting code that Binary Ninja may impor
 Run the tests from the repository root:
 
 ```sh
-python3 -m unittest discover
+python3 -m unittest discover -s tests
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
