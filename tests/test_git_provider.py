@@ -301,6 +301,46 @@ class GitActivationTests(unittest.TestCase):
                 provider.set_enabled(entry, True)
             self.assertFalse((provider.active_dir / "Plugin").exists())
 
+    def test_install_subdir_change_preserves_owned_activation(self):
+        """Changing catalog subdir rebuilds an owned activation before persisting new metadata."""
+        url = "https://github.com/example/Plugin"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = self._checkout(provider, url)
+            (repo / "__init__.py").write_text("ROOT = True\n", encoding="utf-8")
+            nested = repo / "integrations" / "binja"
+            nested.mkdir(parents=True)
+            (nested / "__init__.py").write_text("NESTED = True\n", encoding="utf-8")
+
+            root_entry = types.SimpleNamespace(repo_url=url, install_subdir=None)
+            nested_entry = types.SimpleNamespace(repo_url=url, install_subdir="integrations/binja")
+
+            with patch.object(provider, "_install_requirements", return_value=True):
+                self.assertTrue(provider.set_enabled(root_entry, True))
+
+                active = provider.active_dir / "Plugin"
+                self.assertTrue(active.is_symlink())
+                self.assertTrue(provider._activation_owned_by(active, repo))
+
+                self.assertTrue(provider.prepare_install(nested_entry))
+                metadata = json.loads(provider.metadata_path.read_text(encoding="utf-8"))
+                self.assertNotIn("install_subdir", metadata[repo.name])
+                self.assertTrue(provider._activation_owned_by(active, repo))
+
+                self.assertTrue(provider.set_enabled(nested_entry, True, install_requirements=False))
+                self.assertFalse(active.is_symlink())
+                self.assertTrue((active / "__init__.py").exists())
+                metadata = json.loads(provider.metadata_path.read_text(encoding="utf-8"))
+                self.assertEqual(metadata[repo.name]["install_subdir"], "integrations/binja")
+                self.assertTrue(provider._activation_owned_by(active, repo))
+
+                self.assertTrue(provider.prepare_install(root_entry))
+                self.assertTrue(provider.set_enabled(root_entry, True, install_requirements=False))
+                metadata = json.loads(provider.metadata_path.read_text(encoding="utf-8"))
+                self.assertNotIn("install_subdir", metadata[repo.name])
+                self.assertTrue(provider._activation_owned_by(active, repo))
+                self.assertTrue((active / "__init__.py").exists())
+
     def test_native_catalog_subdir_uses_nested_module_wrapper(self):
         """Mirror Binary Ninja's native loader by importing the catalog-declared nested module."""
         url = "https://github.com/example/monorepo-plugin"
