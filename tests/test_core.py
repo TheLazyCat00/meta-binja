@@ -211,6 +211,18 @@ class PresentationTests(unittest.TestCase):
         """A stale update flag never makes an uninstalled plugin look installed."""
         self.assertEqual(_entry("e", update_available=True).status_kind, "available")
 
+    def test_enabled_native_extension_can_be_not_loaded(self):
+        """Native configured state stays distinct from current-process runtime state."""
+        entry = _entry(
+            "Calltree",
+            source=PluginSource.NATIVE,
+            installed=True,
+            enabled=True,
+            running=False,
+        )
+        self.assertEqual(entry.status_kind, "not_loaded")
+        self.assertEqual(entry.status_label, "Not loaded")
+
 
 class FilterTests(unittest.TestCase):
     """Validate the list filters and search ranking."""
