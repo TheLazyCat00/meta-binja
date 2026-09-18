@@ -23,7 +23,7 @@ class NativeProviderInstallTests(unittest.TestCase):
         extension = FakeExtension("Native Plugin")
         entry = types.SimpleNamespace(backend=extension)
 
-        self.assertTrue(meta_core.NativeProvider.install(entry))
+        self.assertTrue(meta_core.NativeProvider().install(entry))
         self.assertTrue(extension.installed)
         self.assertTrue(extension.enabled)
 
@@ -42,12 +42,14 @@ class NativeProviderInstallTests(unittest.TestCase):
 
         entry = types.SimpleNamespace(backend=Extension())
 
-        self.assertFalse(meta_core.NativeProvider.install(entry))
+        self.assertFalse(meta_core.NativeProvider().install(entry))
         self.assertEqual(calls, ["install"])
 
     def test_enable_failure_is_reported(self):
         """Installation is not reported successful if the extension stays disabled."""
         class Extension:
+            enabled = False
+
             def install(self):
                 return True
 
@@ -55,7 +57,23 @@ class NativeProviderInstallTests(unittest.TestCase):
                 return False
 
         entry = types.SimpleNamespace(backend=Extension())
-        self.assertFalse(meta_core.NativeProvider.install(entry))
+        self.assertFalse(meta_core.NativeProvider().install(entry))
+
+    def test_persisted_enablement_wins_over_live_load_result(self):
+        """A restart-ready extension is successful even if it cannot live-load now."""
+        class Extension:
+            enabled = False
+
+            def install(self):
+                return True
+
+            def enable(self):
+                self.enabled = True
+                return False
+
+        entry = types.SimpleNamespace(backend=Extension())
+        self.assertTrue(meta_core.NativeProvider().install(entry))
+        self.assertTrue(entry.backend.enabled)
 
 
 class NativeProviderThreadingTests(unittest.TestCase):
@@ -84,7 +102,7 @@ class NativeProviderThreadingTests(unittest.TestCase):
         with patch.object(native_provider, "is_main_thread", return_value=False), patch.object(
             native_provider, "execute_on_main_thread_and_wait", side_effect=self._executor(calls)
         ):
-            self.assertTrue(meta_core.NativeProvider.install(entry))
+            self.assertTrue(meta_core.NativeProvider().install(entry))
 
         self.assertEqual(calls, ["install", "main-thread", "enable"])
 
@@ -97,7 +115,7 @@ class NativeProviderThreadingTests(unittest.TestCase):
         with patch.object(native_provider, "is_main_thread", return_value=False), patch.object(
             native_provider, "execute_on_main_thread_and_wait", side_effect=self._executor(calls)
         ):
-            self.assertTrue(meta_core.NativeProvider.set_enabled(entry, True))
+            self.assertTrue(meta_core.NativeProvider().set_enabled(entry, True))
 
         self.assertEqual(calls, ["main-thread"])
         self.assertTrue(extension.enabled)
@@ -111,7 +129,7 @@ class NativeProviderThreadingTests(unittest.TestCase):
         with patch.object(native_provider, "is_main_thread", return_value=False), patch.object(
             native_provider, "execute_on_main_thread_and_wait", side_effect=self._executor(calls)
         ):
-            self.assertTrue(meta_core.NativeProvider.set_enabled(entry, False))
+            self.assertTrue(meta_core.NativeProvider().set_enabled(entry, False))
 
         self.assertEqual(calls, ["main-thread"])
         self.assertFalse(extension.enabled)
@@ -124,7 +142,7 @@ class NativeProviderThreadingTests(unittest.TestCase):
         with patch.object(native_provider, "is_main_thread", return_value=True), patch.object(
             native_provider, "execute_on_main_thread_and_wait"
         ) as execute:
-            self.assertTrue(meta_core.NativeProvider.set_enabled(entry, True))
+            self.assertTrue(meta_core.NativeProvider().set_enabled(entry, True))
 
         execute.assert_not_called()
         self.assertTrue(extension.enabled)
@@ -143,7 +161,7 @@ class NativeProviderThreadingTests(unittest.TestCase):
             native_provider, "execute_on_main_thread_and_wait", side_effect=self._executor(calls)
         ):
             with self.assertRaisesRegex(RuntimeError, "plugin load failed"):
-                meta_core.NativeProvider.set_enabled(entry, True)
+                meta_core.NativeProvider().set_enabled(entry, True)
 
         self.assertEqual(calls, ["main-thread"])
 
