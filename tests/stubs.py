@@ -129,6 +129,8 @@ def install_binaryninja(repositories: Optional[List[FakeRepository]] = None,
     module.log_error = lambda *_args, **_kwargs: None
     module.log_info = lambda *_args, **_kwargs: None
     module.user_directory = lambda: _USER_DIRECTORY
+    module.is_main_thread = lambda: True
+    module.execute_on_main_thread_and_wait = lambda callback: callback()
     sys.modules["binaryninja"] = module
     return module
 
