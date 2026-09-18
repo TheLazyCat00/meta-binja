@@ -26,3 +26,8 @@ For manual validation inside Binary Ninja:
 5. Verify native entries win when a catalog contains the same repository URL.
 6. Exercise install/disable/enable/update/uninstall on a disposable Git-backed
    plugin, and confirm the UI stays responsive throughout.
+7. Install the native community plugin `elbiazo/calltree`, confirm Meta Binja
+   reports the persisted enabled state, restart Binary Ninja, and confirm Calltree
+   becomes `Enabled`. If Binary Ninja does not load it, confirm Meta Binja shows
+   `Not loaded` and the native Extension Manager `@failed_to_load` view exposes
+   the same failure.
