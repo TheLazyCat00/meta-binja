@@ -33,6 +33,7 @@ COLUMN_NAME, COLUMN_VERSION, COLUMN_SOURCE, COLUMN_STATUS = range(4)
 # colored differently so neither one is mistaken for the other.
 STATUS_COLORS = {
     "enabled": "#57a75b",
+    "not_loaded": "#d9534f",
     "disabled": "#8a8a8a",
     "update": "#d9a441",
     "available": "#6f8b99",
@@ -117,6 +118,8 @@ def _format_facts(entry: PluginEntry, details: Dict) -> str:
         facts.append(entry.author)
     if entry.version:
         facts.append(f"v{entry.version}" if not str(entry.version).startswith("v") else str(entry.version))
+    if entry.source is PluginSource.NATIVE and entry.enabled and entry.running is False:
+        facts.append("enabled · not running")
     stars = details.get("stars")
     if isinstance(stars, int):
         facts.append(f"★ {stars:,}")
@@ -427,6 +430,12 @@ class MetaBinjaPanel(QWidget):
             item.setForeground(COLUMN_STATUS, QColor(STATUS_COLORS[entry.status_kind]))
             item.setForeground(COLUMN_VERSION, QColor("#8a8a8a"))
             tooltip = entry.description.strip() or entry.repo_url or entry.name
+            if entry.status_kind == "not_loaded":
+                tooltip = (
+                    "Enabled in Binary Ninja but not running in this process. Restart Binary Ninja; "
+                    "if this persists, check the native Extension Manager's @failed_to_load view and log.\n\n"
+                    + tooltip
+                )
             for column in range(4):
                 item.setToolTip(column, tooltip)
             self.table.addTopLevelItem(item)
@@ -573,16 +582,20 @@ class MetaBinjaPanel(QWidget):
         self._set_busy(True, f"{label} in progress…")
         self.tasks.run(
             lambda: callback(entry),
-            lambda ok: self._action_done(label, bool(ok)),
+            lambda ok: self._action_done(label, bool(ok), entry),
             lambda message: self._action_failed(label, message),
         )
 
-    def _action_done(self, label: str, ok: bool) -> None:
+    def _action_done(self, label: str, ok: bool, entry: PluginEntry) -> None:
         """Report the outcome of a lifecycle action and reload provider state."""
         self._set_busy(False, "")
         if not ok:
             self._set_error(f"{label} did not complete successfully.")
             self._restore_controls()
+        elif entry.source is PluginSource.NATIVE:
+            self._pending_status = (
+                f"{label} completed. Restart Binary Ninja to apply native extension changes."
+            )
         else:
             self._pending_status = f"{label} completed."
         self.refresh(force=False)
