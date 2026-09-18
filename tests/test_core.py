@@ -214,9 +214,20 @@ class RegistryLifecycleTests(unittest.TestCase):
         class Git:
             def __init__(self):
                 self.installs = []
+                self.prepared = []
+                self.enabled = []
+                self.prepare_result = True
 
             def entries(self, check_updates=False):
                 return list(git_entries)
+
+            def prepare_install(self, entry):
+                self.prepared.append(entry)
+                return self.prepare_result
+
+            def set_enabled(self, entry, enabled, install_requirements=True):
+                self.enabled.append((entry, enabled, install_requirements))
+                return True
 
             def install(self, entry):
                 self.installs.append(entry)
@@ -295,9 +306,30 @@ class RegistryLifecycleTests(unittest.TestCase):
 
         self.assertTrue(registry.install(entry))
 
+        self.assertEqual(registry.git.prepared, [entry])
         self.assertEqual(registry.native.handoffs, [entry])
         self.assertEqual(registry.native.installs, [])
-        self.assertEqual(registry.git.installs, [entry])
+        self.assertEqual(registry.git.installs, [])
+        self.assertEqual(registry.git.enabled, [(entry, True, False)])
+
+    def test_failed_git_preflight_keeps_existing_native_install(self):
+        """A clone/preflight failure happens before native migration cleanup."""
+        entry = PluginEntry(
+            id="native:community:elbiazo_calltree",
+            name="Calltree",
+            source=PluginSource.NATIVE,
+            repo_url="https://github.com/elbiazo/calltree",
+            native_installed=True,
+        )
+        registry = self._registry([], [])
+        registry.git.prepare_result = False
+
+        self.assertFalse(registry.install(entry))
+
+        self.assertEqual(registry.git.prepared, [entry])
+        self.assertEqual(registry.native.handoffs, [])
+        self.assertEqual(registry.git.enabled, [])
+
 
     def test_package_only_native_entry_keeps_native_fallback(self):
         """Extensions without a clonable project URL retain Binary Ninja's lifecycle."""
