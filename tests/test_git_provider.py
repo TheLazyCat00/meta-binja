@@ -300,6 +300,95 @@ class GitActivationTests(unittest.TestCase):
                 provider.set_enabled(entry, True)
             self.assertFalse((provider.active_dir / "Plugin").exists())
 
+    def test_native_catalog_subdir_is_the_activation_source(self):
+        """Expose the catalog-declared plugin subdirectory instead of the repository root."""
+        url = "https://github.com/example/monorepo-plugin"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = self._checkout(provider, url)
+            source = repo / "integrations" / "binja"
+            source.mkdir(parents=True)
+            (source / "__init__.py").write_text("", encoding="utf-8")
+            entry = types.SimpleNamespace(repo_url=url, install_subdir="integrations/binja")
+
+            with patch.object(provider, "_install_requirements", return_value=True) as requirements, patch(
+                "meta_binja.git_provider.os.symlink"
+            ) as symlink:
+                self.assertTrue(provider.install(entry))
+
+            active = provider.active_dir / "monorepo-plugin"
+            symlink.assert_called_once_with(source, active, target_is_directory=True)
+            requirements.assert_called_once_with(repo, source)
+            metadata = json.loads(provider.metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata[repo.name]["install_subdir"], "integrations/binja")
+
+    def test_subdir_copy_fallback_copies_only_plugin_package(self):
+        """Windows-style copy activation must copy the plugin subdirectory, not the whole monorepo."""
+        url = "https://github.com/example/monorepo-plugin"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = self._checkout(provider, url)
+            (repo / "root-only.txt").write_text("not plugin", encoding="utf-8")
+            source = repo / "plugins" / "binja"
+            source.mkdir(parents=True)
+            (source / "__init__.py").write_text("", encoding="utf-8")
+            (source / "plugin.txt").write_text("plugin", encoding="utf-8")
+            entry = types.SimpleNamespace(repo_url=url, install_subdir="plugins/binja")
+
+            with patch.object(provider, "_install_requirements", return_value=True), patch(
+                "meta_binja.git_provider.os.symlink", side_effect=OSError("unavailable")
+            ):
+                self.assertTrue(provider.install(entry))
+
+            active = provider.active_dir / "monorepo-plugin"
+            self.assertTrue((active / "plugin.txt").exists())
+            self.assertFalse((active / "root-only.txt").exists())
+            self.assertTrue(provider._activation_owned_by(active, repo))
+
+    def test_subdir_traversal_is_rejected(self):
+        """Catalog metadata cannot escape the managed checkout during activation."""
+        url = "https://github.com/example/plugin"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            self._checkout(provider, url)
+            entry = types.SimpleNamespace(repo_url=url, install_subdir="../other")
+
+            with self.assertRaisesRegex(ValueError, "Unsafe plugin subdirectory"):
+                provider.install(entry)
+
+            self.assertEqual(list(provider.active_dir.iterdir()), [])
+
+    def test_root_and_subdir_requirements_are_both_installed(self):
+        """Monorepo plugins may carry shared root requirements plus plugin-specific ones."""
+        calls = []
+
+        class PythonProvider:
+            """Record Binary Ninja dependency-installer payloads."""
+
+            def _install_modules(self, context, payload):
+                """Pretend pip succeeded while retaining each requirements payload."""
+                calls.append((context, payload))
+                return True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._provider(temp_dir)
+            repo = Path(temp_dir) / "repo"
+            source = repo / "plugins" / "binja"
+            source.mkdir(parents=True)
+            (repo / "requirements.txt").write_text("networkx>=2.5\n", encoding="utf-8")
+            (source / "requirements.txt").write_text("requests>=2\n", encoding="utf-8")
+
+            with patch.object(binaryninja, "PythonScriptingProvider", PythonProvider, create=True):
+                self.assertTrue(provider._install_requirements(repo, source))
+
+        self.assertEqual(
+            calls,
+            [
+                (None, b"networkx>=2.5\n"),
+                (None, b"requests>=2\n"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
