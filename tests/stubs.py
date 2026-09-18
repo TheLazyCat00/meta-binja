@@ -36,6 +36,7 @@ class FakeExtension:
         enabled: bool = False,
         update_available: bool = False,
         version: str = "1.0.0",
+        running: Optional[bool] = None,
     ) -> None:
         self.name = name
         self.path = path or name.lower().replace(" ", "-")
@@ -45,6 +46,7 @@ class FakeExtension:
         self.installed = installed
         self.enabled = enabled
         self.update_available = update_available
+        self.running = enabled if running is None else running
         self.current_version = FakeVersion(version)
         self.latest_version_id = "latest"
 
@@ -58,11 +60,13 @@ class FakeExtension:
         """Mark the extension uninstalled."""
         self.installed = False
         self.enabled = False
+        self.running = False
         return True
 
     def enable(self) -> bool:
         """Mark the extension enabled."""
         self.enabled = True
+        self.running = True
         return True
 
 
