@@ -168,6 +168,8 @@ class GitProvider:
         normalized_subdir = _validated_subdir(install_subdir)
         if normalized_subdir:
             record["install_subdir"] = normalized_subdir
+        elif install_subdir == "":
+            record.pop("install_subdir", None)
         metadata[repo.name] = record
         self._write_metadata(metadata)
 
@@ -181,9 +183,8 @@ class GitProvider:
 
     def _entry_subdir(self, entry, repo: Path) -> Optional[str]:
         """Return the normalized plugin subdirectory from the entry or persisted metadata."""
-        candidate = getattr(entry, "install_subdir", None)
-        if candidate:
-            return _validated_subdir(candidate)
+        if hasattr(entry, "install_subdir"):
+            return _validated_subdir(getattr(entry, "install_subdir"))
         return _validated_subdir(self._metadata_record(repo).get("install_subdir"))
 
     def _activation_source(self, repo: Path, install_subdir: Optional[str] = None) -> Path:
@@ -443,7 +444,7 @@ class GitProvider:
             return False
         install_subdir = _validated_subdir(getattr(entry, "install_subdir", None))
         self._activation_source(repo, install_subdir)
-        self._remember(entry.repo_url, repo, install_subdir=install_subdir)
+        self._remember(entry.repo_url, repo, install_subdir=install_subdir or "")
         return self.set_enabled(entry, True)
 
     def uninstall(self, entry) -> bool:
