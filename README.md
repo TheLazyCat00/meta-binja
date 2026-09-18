@@ -16,7 +16,7 @@ Meta Binja brings Binary Ninja's official/community extensions, arbitrary Git re
   repository facts cached on disk.
 - Unified search across Binary Ninja's configured Extension Manager repositories.
 - Paste a Git repository URL directly into search to open its management page.
-- Use Binary Ninja's Extension Manager repositories as discovery catalogs, then clone source-backed official/community plugins through the same Git lifecycle as direct repository installs.
+- Use Binary Ninja's Extension Manager repositories as discovery catalogs, then clone source-backed Python official/community plugins through the same Git lifecycle as direct repository installs.
 - Clone, update, enable/disable, and uninstall Git-backed Python plugins, including catalog entries with plugin subdirectories.
 - Add extra discovery catalogs via `metaBinja.catalogSources` in Binary Ninja Settings.
 - Accept a GitHub repository URL for an awesome-list directly, plus raw Markdown and simple JSON catalogs.
@@ -69,7 +69,7 @@ Paste a repository URL into Meta Binja's search field:
 https://github.com/example/my-binja-plugin
 ```
 
-If the URL matches a Binary Ninja catalog entry, Meta Binja keeps that catalog metadata but uses the same Git-backed lifecycle as a direct repository install. Package-only extensions without a clonable project URL fall back to Binary Ninja's native lifecycle.
+If the URL matches a Binary Ninja catalog entry, Meta Binja keeps that catalog metadata but uses the same Git-backed lifecycle as a direct repository install. Compiled/prebuilt or package-only extensions that are not clone-and-run Python plugins fall back to Binary Ninja's native lifecycle.
 
 ## Security model
 
