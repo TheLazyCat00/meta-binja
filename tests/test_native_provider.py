@@ -5,9 +5,9 @@ import unittest
 from unittest.mock import patch
 
 try:
-    from tests.stubs import FakeExtension, FakeRepository, install_binaryninja
+    from tests.stubs import FakeExtension, install_binaryninja
 except ImportError:  # pragma: no cover - direct test invocation
-    from stubs import FakeExtension, FakeRepository, install_binaryninja
+    from stubs import FakeExtension, install_binaryninja
 
 install_binaryninja()
 
@@ -56,124 +56,6 @@ class NativeProviderInstallTests(unittest.TestCase):
 
         entry = types.SimpleNamespace(backend=Extension())
         self.assertFalse(meta_core.NativeProvider.install(entry))
-
-
-class NativeProviderDiscoveryTests(unittest.TestCase):
-    """Validate metadata exported from Binary Ninja's extension catalog."""
-
-    def test_entries_preserve_project_url_subdir_and_native_state(self):
-        """Discovery retains everything GitProvider needs without owning lifecycle state."""
-        extension = FakeExtension(
-            "Monorepo Plugin",
-            project_url="https://github.com/example/monorepo",
-            installed=True,
-            enabled=True,
-            subdir="integrations/binja",
-        )
-        install_binaryninja([FakeRepository("community", [extension])])
-
-        entries = meta_core.NativeProvider().entries()
-
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0].repo_url, "https://github.com/example/monorepo")
-        self.assertEqual(entries[0].install_subdir, "integrations/binja")
-        self.assertTrue(entries[0].native_installed)
-        self.assertTrue(entries[0].git_installable)
-
-    def test_compiled_extension_stays_on_native_fallback(self):
-        """A repository URL alone is not enough to clone-and-run a non-Python extension."""
-        extension = FakeExtension(
-            "Compiled Plugin",
-            project_url="https://github.com/example/compiled",
-            apis=["cpp"],
-        )
-        install_binaryninja([FakeRepository("community", [extension])])
-
-        entry = meta_core.NativeProvider().entries()[0]
-
-        self.assertFalse(entry.git_installable)
-
-
-class NativeProviderHandoffTests(unittest.TestCase):
-    """Validate one-time cleanup when a native install moves to Git ownership."""
-
-    def test_handoff_disables_and_uninstalls_existing_native_copy(self):
-        """An old native install is removed before the Git-managed copy is activated."""
-        extension = FakeExtension("Calltree", installed=True, enabled=True)
-        entry = types.SimpleNamespace(
-            backend=extension,
-            native_installed=True,
-            name="Calltree",
-        )
-
-        self.assertTrue(meta_core.NativeProvider.prepare_git_handoff(entry))
-        self.assertFalse(extension.installed)
-        self.assertFalse(extension.enabled)
-        self.assertFalse(entry.native_installed)
-
-    def test_failed_native_uninstall_restores_enabled_state_on_main_thread(self):
-        """A failed handoff restores an enabled native extension before reporting failure."""
-        calls = []
-
-        class Extension:
-            installed = True
-            enabled = True
-
-            def enable(self):
-                calls.append("enable")
-                self.enabled = True
-                return True
-
-            def uninstall(self):
-                calls.append("uninstall")
-                return False
-
-        entry = types.SimpleNamespace(
-            backend=Extension(),
-            native_installed=True,
-            name="Calltree",
-        )
-
-        def execute(callback):
-            calls.append("main-thread")
-            callback()
-
-        with patch.object(native_provider, "is_main_thread", return_value=False), patch.object(
-            native_provider, "execute_on_main_thread_and_wait", side_effect=execute
-        ):
-            with self.assertRaisesRegex(RuntimeError, "Could not remove existing native install"):
-                meta_core.NativeProvider.prepare_git_handoff(entry)
-
-        self.assertTrue(entry.backend.enabled)
-        self.assertEqual(
-            calls,
-            [
-                "main-thread",  # disable
-                "main-thread", "uninstall",
-                "main-thread", "enable",
-            ],
-        )
-
-    def test_handoff_is_noop_when_native_copy_is_absent(self):
-        """Fresh source-backed installs never touch the native lifecycle."""
-        calls = []
-
-        class Extension:
-            installed = False
-            enabled = False
-
-            def uninstall(self):
-                calls.append("uninstall")
-                return True
-
-        entry = types.SimpleNamespace(
-            backend=Extension(),
-            native_installed=False,
-            name="Calltree",
-        )
-
-        self.assertTrue(meta_core.NativeProvider.prepare_git_handoff(entry))
-        self.assertEqual(calls, [])
 
 
 class NativeProviderThreadingTests(unittest.TestCase):

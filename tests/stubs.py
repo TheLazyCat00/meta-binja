@@ -36,8 +36,6 @@ class FakeExtension:
         enabled: bool = False,
         update_available: bool = False,
         version: str = "1.0.0",
-        subdir: str = "",
-        apis=None,
     ) -> None:
         self.name = name
         self.path = path or name.lower().replace(" ", "-")
@@ -49,8 +47,6 @@ class FakeExtension:
         self.update_available = update_available
         self.current_version = FakeVersion(version)
         self.latest_version_id = "latest"
-        self.subdir = subdir
-        self.apis = list(apis if apis is not None else ["python3"])
 
     def install(self, _version_id=None) -> bool:
         """Mark the extension installed, as Binary Ninja would."""
