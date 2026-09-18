@@ -47,6 +47,7 @@ class PluginEntry:
     local_path: Optional[str] = None
     install_subdir: Optional[str] = None
     native_installed: bool = False
+    git_installable: bool = True
     backend: Any = field(default=None, repr=False, compare=False)
 
     @property
@@ -218,6 +219,11 @@ class NativeProvider:
                         source_name=repo.path,
                         install_subdir=getattr(ext, "subdir", "") or None,
                         native_installed=bool(ext.installed),
+                        git_installable=bool(
+                            ext.project_url
+                            and is_repo_url(ext.project_url)
+                            and "python3" in list(getattr(ext, "apis", []) or [])
+                        ),
                         backend=ext,
                     )
                 )
@@ -661,13 +667,14 @@ class PluginRegistry:
             canonical = canonical_repo_url(entry.repo_url) if entry.repo_url and is_repo_url(entry.repo_url) else None
             if canonical:
                 git_entry = git_by_repo.pop(canonical, None)
-                if git_entry is not None:
-                    self._copy_git_state(entry, git_entry)
-                else:
-                    entry.installed = False
-                    entry.enabled = False
-                    entry.update_available = False
-                    entry.local_path = None
+                if entry.git_installable:
+                    if git_entry is not None:
+                        self._copy_git_state(entry, git_entry)
+                    else:
+                        entry.installed = False
+                        entry.enabled = False
+                        entry.update_available = False
+                        entry.local_path = None
                 by_repo[canonical] = entry
             combined.append(entry)
 
@@ -735,7 +742,7 @@ class PluginRegistry:
     @staticmethod
     def _uses_git_lifecycle(entry: PluginEntry) -> bool:
         """Return whether an entry can be managed directly from its source repository."""
-        return bool(entry.repo_url and is_repo_url(entry.repo_url))
+        return bool(entry.git_installable and entry.repo_url and is_repo_url(entry.repo_url))
 
     def install(self, entry):
         """Install through Git when a source repository exists, otherwise fall back to native."""
