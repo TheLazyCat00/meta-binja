@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Unified source-backed native/community extensions with the Git lifecycle: Binary Ninja now supplies discovery metadata while Meta Binja clones, updates, enables, disables, and uninstalls the repository itself.
-- Added native-to-Git migration cleanup for extensions installed by earlier Meta Binja versions, preventing native and Git-managed copies from coexisting after restart.
+- Unified source-backed Python native/community extensions with the Git lifecycle: Binary Ninja now supplies discovery metadata while Meta Binja clones, updates, enables, disables, and uninstalls the repository itself.
+- Added preflight-safe native-to-Git migration cleanup for extensions installed by earlier Meta Binja versions, preventing native and Git-managed copies from coexisting after restart.
 - Added support for Binary Ninja catalog `subdir` metadata, including safe repository-relative validation, subdirectory activation, copy fallback, persistence, and root/subdir dependency installation.
 - Fixed native Extension Manager plugins failing to load after installation by dispatching enable/disable operations to Binary Ninja's registered main thread while keeping installation work asynchronous.
 - Fixed Binary Ninja settings registration so `metaBinja.catalogSources` uses the valid `metaBinja` group.
