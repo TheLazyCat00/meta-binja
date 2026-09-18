@@ -623,6 +623,8 @@ class PluginRegistry:
         catalog.update_available = git_entry.update_available
         catalog.version = git_entry.version or catalog.version
         catalog.local_path = git_entry.local_path
+        if catalog.install_subdir is None:
+            catalog.install_subdir = git_entry.install_subdir
         if catalog.backend is None:
             catalog.backend = git_entry.backend
         return catalog
