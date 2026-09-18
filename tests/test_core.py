@@ -160,7 +160,16 @@ class GitProviderTests(unittest.TestCase):
                 json.dumps({checkout.name: "https://github.com/example/sample"}),
                 encoding="utf-8",
             )
-            provider._git = lambda _repo, *args, **_kwargs: "abc123\n" if "rev-parse" in args else ""
+            def fake_git(_repo, *args, **_kwargs):
+                if "--is-inside-work-tree" in args:
+                    return "true\n"
+                if "--is-bare-repository" in args:
+                    return "false\n"
+                if "rev-parse" in args:
+                    return "abc123\n"
+                return ""
+
+            provider._git = fake_git
             provider._update_available = lambda _repo: False
 
             entries = provider.entries()
