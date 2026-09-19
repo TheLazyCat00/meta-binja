@@ -206,6 +206,7 @@ class PanelTests(unittest.TestCase):
         entry = panel.registry.search("hashdb")[0]
         self.assertFalse(entry.installed)
         self.assertFalse(entry.enabled)
+        self.assertEqual(panel.install_btn.text(), "Install")
         panel.deleteLater()
 
     def test_failed_action_restores_the_enabled_checkbox(self):
