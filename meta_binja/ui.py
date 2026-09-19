@@ -479,13 +479,15 @@ class MetaBinjaPanel(QWidget):
 
     # --------------------------------------------------------- detail render
 
-    def _show_entry(self, entry: PluginEntry, force: bool = False) -> None:
+    def _show_entry(self, entry: PluginEntry, force: bool = False, rerender: bool = False) -> None:
         """Render an entry while preserving discovery metadata and live Git state.
 
         ``force`` comes from an explicit refresh and reaches the README and
         repository facts, which are otherwise served from the TTL cache.
+        ``rerender`` refreshes the visible controls even when provider refresh
+        reused the same entry object after a lifecycle action.
         """
-        if entry is self.current_entry and self.stack.currentIndex() == 1 and not force:
+        if entry is self.current_entry and self.stack.currentIndex() == 1 and not force and not rerender:
             return
         if entry.source is PluginSource.CATALOG and entry.repo_url:
             git_state = self.registry.git.entry_from_url(entry.repo_url, check_updates=False)
@@ -617,11 +619,11 @@ class MetaBinjaPanel(QWidget):
         if old.repo_url:
             matches = self.registry.search(old.repo_url)
             if matches:
-                self._show_entry(matches[0], force)
+                self._show_entry(matches[0], force, rerender=True)
                 return
         for entry in self.registry.search(old.name):
             if entry.id == old.id:
-                self._show_entry(entry, force)
+                self._show_entry(entry, force, rerender=True)
                 return
         self.show_list()
 
